@@ -4,7 +4,6 @@ import SwiftUI
 
 
 
-
 /// 状态栏项 + 下拉面板的控制器。
 ///
 /// 位置由系统统一排版（从右往左挤），右侧空间不足时会自动降级成更窄的档位。
@@ -29,9 +28,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 用户看到的就是"箭头先反向跳一下"。所以改成"**一段时间内窗口完全不再变化**
     /// （`settleDelay`）"才算排版完成。
     private var settleWork: DispatchWorkItem?
-    /// 用户的真实意图：面板是否应该开着。换档重定位期间会短暂收掉面板，
-    /// 但那时 `isPanelOpen` 会被 `popoverDidClose` 置 false，不能拿它当判据。
-    private var userWantsPanel = false
     private let settleDelay: TimeInterval = 0.03
     /// 上一次看到的状态栏窗口 frame（**只用于观测**是否变化，不作为"排版完成"的判据）
     private var lastSeenStatusWindowFrame: NSRect?
@@ -183,7 +179,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isPanelOpen || self.popover.isShown else { return }
             self.isPanelOpen = false
-            self.userWantsPanel = false
             self.isAnimating = true
             self.popover.performClose(nil)
         }
@@ -211,7 +206,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func applyToggle() {
         if isPanelOpen {
             isPanelOpen = false
-            userWantsPanel = false
             isAnimating = true
             popover.performClose(nil)
             return
@@ -221,12 +215,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 面板内容按需创建：NSHostingController + 整个 SwiftUI 视图树（含窗口图层）
         // 实测要占 35MB 左右，而且关掉之后系统也不回收，还会每秒跟着数据重绘。
         // 所以关闭时释放，下次打开再建（历史曲线在 SystemMonitor 里，不受影响）。
-        ensureContentView()
+        if popover.contentViewController == nil {
+            // 底部三个菜单里选完任一项就收起整个面板：菜单（NSMenu）自己会关，
+            // 但面板是独立的 NSPopover，不主动收就会留在屏幕上挡视线。
+            let view = DashboardView(
+                monitor: monitor,
+                preferences: preferences,
+                onMenuSelection: { [weak self] in
+                    self?.closePopoverIfShown()
+                }
+            )
+            let hosting = NSHostingController(rootView: view)
+            hosting.sizingOptions = .preferredContentSize
+            popover.contentViewController = hosting
+        }
 
         // 关键：先激活 App。状态栏 App 平时不是活动 App，否则面板里的第一次点击会被
         // 系统用去「激活 App + 让弹窗成为 key window」，这一次点击不会传给控件。
         isPanelOpen = true
-        userWantsPanel = true
         isAnimating = true
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: anchorRect(for: button), of: button, preferredEdge: .minY)
@@ -236,26 +242,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         lastStatusWindowFrame = button.window?.frame
         lastSeenStatusWindowFrame = button.window?.frame
         popover.contentViewController?.view.window?.makeKey()
-    }
-
-    /// 按需创建面板内容视图。
-    ///
-    /// 关闭面板时会释放它（省内存），所以"收起→重开"的重定位路径也必须先建回来，
-    /// 否则重开出来是空白面板。
-    private func ensureContentView() {
-        guard popover.contentViewController == nil else { return }
-        // 底部三个菜单里选完任一项就收起整个面板：菜单（NSMenu）自己会关，
-        // 但面板是独立的 NSPopover，不主动收就会留在屏幕上挡视线。
-        let view = DashboardView(
-            monitor: monitor,
-            preferences: preferences,
-            onMenuSelection: { [weak self] in
-                self?.closePopoverIfShown()
-            }
-        )
-        let hosting = NSHostingController(rootView: view)
-        hosting.sizingOptions = .preferredContentSize
-        popover.contentViewController = hosting
     }
 
     /// 面板箭头锚定的矩形。
@@ -295,24 +281,27 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard isPanelOpen else { return }
 
         if moved {
-            // 系统换档时**自己会把面板挪到"新宽度 + 旧 x"算出的位置**（实测 978→870/902）。
-            // 这一步无法阻止，而那个位置离正确位置很远（45pt 量级）——只要被画出来就看得见。
-            // 所以换档期间**干脆把面板收掉**，等系统排版完成（`settleDelay` 静默期结束）
-            // 再按最终窗口重新打开：面板不经过那个错误位置，用户看不到"跳一下"。
-            // ⚠️ 试过更轻的"把窗口 alpha 置 0"，**不行**：面板隐藏时 `popover.show` 会被系统
-            // 整个吞掉（实测连调用都不返回），恢复可见后就停在系统挪到的错误位置。
+            // 窗口又动了：重新计时。等待期间**不动面板**，避免用"混合了两个属性"的中间态
+            // 算出错误中心（那正是"反向跳一下"的来源）。
             settleWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
-                guard let self, self.userWantsPanel, self.statusItem.button != nil else { return }
+                guard let self, self.isPanelOpen, let btn = self.statusItem.button else { return }
                 self.settleWork = nil
-                self.popover.performClose(nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-                    guard let self, self.userWantsPanel, let b = self.statusItem.button else { return }
-                    // performClose 触发的 popoverDidClose 会把 isPanelOpen 置 false，
-                    // 但用户的意图是"面板开着"——这里要恢复它，否则守卫会把重开挡掉。
-                    self.isPanelOpen = true
-                    self.showPanel(at: b.window?.frame ?? .zero, button: b)
+                let settled = btn.window?.frame ?? .zero
+                guard self.lastStatusWindowFrame != settled else { return }
+                self.showPanel(at: settled, button: btn)
+                // ⚠️ 系统**自己也会"纠正"偏离的面板**：换档时它会把面板挪到
+                // "新宽度 + 旧 x"算出的位置（实测 978→870/902，就是用户看到的反向跳）。
+                // 而 `popover.show` 在面板已显示时可能被它吞掉，所以紧接着再压一次，
+                // 确保最终停在按**已落定**窗口算出的正确位置。
+                let again = DispatchWorkItem { [weak self] in
+                    guard let self, self.isPanelOpen, let b = self.statusItem.button else { return }
+                    let target = b.window?.frame ?? .zero
+                    guard let current = self.popover.contentViewController?.view.window?.frame,
+                          abs(current.midX - target.midX) > 1 else { return }
+                    self.popover.show(relativeTo: self.anchorRect(for: b), of: b, preferredEdge: .minY)
                 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: again)
             }
             settleWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay, execute: work)
@@ -329,7 +318,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 只在 `syncPanelAnchor` 确认"系统排版已完成"之后调用，拿到的是最终值，
     /// 不需要预测、去抖或事后校正。
     private func showPanel(at frame: NSRect, button btn: NSStatusBarButton) {
-        ensureContentView()
         let rect = anchorRect(for: btn)
         lastAnchorRect = rect
         lastStatusWindowFrame = frame
