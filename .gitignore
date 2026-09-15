@@ -1,0 +1,6 @@
+build/
+dist/
+.DS_Store
+
+# 历史版本存档（文件副本，不纳入版本库）
+Backups/
