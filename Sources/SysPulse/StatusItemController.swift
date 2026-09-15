@@ -21,49 +21,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var isPanelOpen = false
     /// 上一次 `popover.show` 用的锚点矩形，用来判断锚点是否真的动了
     private var lastAnchorRect: NSRect?
-    /// 上一次看到的**状态栏窗口 frame**（观测用）。窗口一变就说明系统在动它。
+    /// 上一次看到的状态栏窗口 **x**。
     ///
-    /// ⚠️ 它必须和"上次用来定位的 frame"（`lastStatusWindowFrame`）**分开**：
-    /// 曾经共用一个变量、并且只在"真的执行了定位"时才记账，结果去抖期间每次重绘
-    /// 都拿**旧基准**和当前 frame 比 → 同一个 frame 被反复判定成"又变了" →
-    /// 去抖被无限刷新，只能靠上限强制（实测等了 442ms 才定位，中间态还多停了一会儿）。
-    /// 现在：观测到变化立刻记账，于是第一次变化只调度一次去抖，等待期间不再刷新。
-    private var lastSeenStatusWindowFrame: NSRect?
-    /// 上一次**真正用于定位**的 frame。
+    /// 为什么只认 x、不认整个 frame：系统换档时**分两段**改状态栏窗口——
+    /// 先改**宽度**（x 不动），约 15ms 后才改 **x**。宽度变化只是排版中间态，
+    /// 这一刻算出的锚点中心（旧 x + 新宽度/2）是错的；**x 变化才代表排版完成**。
+    /// ⚠️ 踩过的坑：以前拿"frame 变了"当判据，于是在宽度刚变、x 还没跟上时就动手，
+    /// 面板先被摆到错误位置、再跳回正确位置——用户看到的就是"箭头先反向跳一下"。
+    /// 实测把所有 `show` 都关掉后系统**从不主动移动面板**，所以那一下确实是抢跑造成的。
+    private var lastSeenStatusWindowX: CGFloat?
+    /// 上一次**真正用于定位**的窗口 frame。
     private var lastStatusWindowFrame: NSRect?
-    /// 待执行的"重新锚定"任务。系统换档时会**分两拍**改状态栏窗口（见 `syncPanelAnchor`），
-    /// 每一拍都去重锚就会形成"先反向跳一下、再跳到正确位置"，所以这里做去抖：
-    /// 观测到变化后等窗口稳定 `anchorSettleDelay` 再定位一次。
-    private var pendingAnchorWork: DispatchWorkItem?
-    private var pendingAnchorSince: Date?
-    /// 去抖窗口：只等到"系统排完版"就够，不能等更久。
-    ///
-    /// 系统换档时会在改**宽度**的同时自行把面板挪到一个中间位置（实测面板
-    /// 947→902），要等它再改完 **x** 才轮到我们定位。这段等待有多长，用户就会
-    /// 在那个中间位置停留多久——所以这个值要**刚好覆盖两拍间隔**（实测 45ms～110ms），
-    /// 取大了反而把中间态停留时间一起拉长（曾经取 180ms，实测停留 181ms，非常显眼）。
-    /// 取 60ms（约等于流光一帧）：只作为**预测不命中时**的兜底等待。
-    private let anchorSettleDelay: TimeInterval = 0.06
-    /// 兜底：万一窗口确实在持续变化，最多推迟这么久就按当前值定位一次
-    private let anchorMaxDefer: TimeInterval = 0.3
-    /// 重新定位的定时器：`popover.show` 在面板已显示时**有时会被系统整个忽略**
-    /// （实测 `before=902 after=902`），单次调用不可靠。所以用一个短周期定时器
-    /// **反复核对、直到面板真的落到目标位置**（最多 `relocateDeadline`）。
-    private var relocateTimer: Timer?
-    private var relocateTarget: NSRect?
-    private var relocateDeadline: Date?
-    /// 拖动校正的最长时间：超过就放弃，避免面板被反复打扰
-    private let relocateMaxDuration: TimeInterval = 0.5
-
-    /// 对"系统还会再改一次 x"的预测（纯优化，猜错会被下一拍纠正）。
-    ///
-    /// 实测规律：系统换档时**先改宽度、并保持窗口右边缘不动**，过一会儿才把 x 挪到
-    /// 最终位置；此时"中间态"满足 `minX + width == 上一拍的右边缘`。命中这个规律就能
-    /// 直接算出最终 x（`右边缘 − 新宽度`）一次定位到位，用户看不到中间态。
-    /// ⚠️ 这个规律**只在第二拍出现时成立**：实测第一拍（刚改宽度那一拍）右边缘会短暂
-    /// 不守恒，那一拍预测不出来，只能靠 `anchorSettleDelay` 等——中间态于是会存在
-    /// 约 40ms（系统自己两拍之间的间隔），无法再压缩。
-    private var predictedSettledFrame: NSRect?
     /// 动画进行中收到的点击先记账，等动画结束再补上，避免被系统忽略
     private var pendingToggle = false
     private var isAnimating = false
@@ -271,10 +239,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 初始定位用的是当前 frame：观测基准与定位基准一起记账，
         // 这样面板刚打开时不会被"误判成刚变化"而白等一次去抖。
         lastStatusWindowFrame = button.window?.frame
-        lastSeenStatusWindowFrame = lastStatusWindowFrame
-        pendingAnchorWork?.cancel()
-        pendingAnchorWork = nil
-        pendingAnchorSince = nil
+        lastSeenStatusWindowX = button.window?.frame.minX
         popover.contentViewController?.view.window?.makeKey()
     }
 
@@ -286,183 +251,50 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         button.bounds
     }
 
-    /// 面板开着时，只要**状态栏窗口的 frame 变了**，就把面板重新锚定到新的图标中心。
+    /// 面板开着时，如果**系统把状态栏窗口的 x 挪了**，就把面板重新锚定到新的图标中心。
     ///
-    /// - `NSPopover` **不会跟着锚点自己走**：图标宽度变了，面板停在原地；实测甚至会反向跑
-    ///   （图标中心左移 54pt、面板右移 54pt，偏差 +107.5pt，箭头直接指到图标边缘）。
-    /// - 触发条件用"**窗口 frame 变化**"，而不是定时/延时猜测：窗口 frame 变了就是
-    ///   "系统已经在挪它"的最直接证据。这个检查每次重绘都会跑（含流光的 15fps 帧），
-    ///   所以窗口一挪动就能在一帧内跟上；没变化时只是一次 rect 比较。
-    /// - ⚠️ **必须去抖，不能一看到 frame 变了就定位**（2026-09-16 定位到根因并修复）：
-    ///   系统换档（显示项开关、启动升档）时**分两拍**改状态栏窗口——
-    ///   先改**宽度**（`x` 暂时不动），过一会儿才把 `x` 挪到最终位置。3ms 采样实测：
+    /// - `NSPopover` **不会跟着锚点自己走**：图标宽度变了、窗口挪了，面板都停在原地
+    ///   （实测偏差能到 +107.5pt，箭头直接指到图标边缘）。必须自己补一次 `show`。
+    /// - ✅ **判据只看 x，不看整个 frame**（2026-09-16 用逐毫秒采样定的案）：
+    ///   系统换档时**分两段**改状态栏窗口——先改**宽度**（x 不动），约 **15ms** 后才改 **x**：
     ///   ```
-    ///   t=2.028  w 119→121        （先动一点点）
-    ///   t=2.072  x 1104→1102, w→229   ← 中间态：新宽度 + 旧 x，锚点中心算出来是错的
-    ///   t=2.138  x →994               ← 最终位置
+    ///   t=3.0102  win x=1102 w=121 → w=184   ← 只是中间态：宽度变了、x 还是旧的
+    ///   t=3.0252  win x=1102 → 1039          ← x 就位，排版完成
     ///   ```
-    ///   若在"中间态"定位一次，用户看到的就是"箭头先向左跳一下、再跳到右边"。
-    ///   这里改成：**观测到变化先记账**（和"上次定位用的 frame"分开记），
-    ///   再用两种手段避开中间态：
-    ///   1. **能预测就直接跳到最终位置**——若这一拍的宽度变了、且窗口右边缘与上一拍
-    ///      相同，就按"右边缘守恒"算出最终 x（`右边缘 − 新宽度`），一次定位到位。
-    ///      实测这个预测与系统最终给出的 x 完全一致（994 / 1039 都对上），
-    ///      真实场景下"面板换档"只剩**一次**移动，中间态根本不出现。
-    ///   2. **预测不了就等 `anchorSettleDelay`（60ms）再定位**（兜底还有 `anchorMaxDefer`）。
-    ///      注意等待期间**不要重置计时**：在 15fps 重绘下每 67ms 就被推后一次，
-    ///      会永远等不到，只能靠上限强制（实测拖到 442ms，中间态反而停得更久）。
-    ///   分开记账是关键：共用"上次定位用的 frame"会让同一个 frame 被反复当成新变化。
+    ///   宽度变化时算出的锚点中心（旧 x + 新宽度/2）是**错的**。旧代码拿"frame 变了"当判据，
+    ///   于是在第一段就动手，面板被摆到错误位置（用户看到的"反向跳一下"），x 就位后再跳回来。
+    ///   **把代码里所有 `show` 关掉的对照实验证明：系统自己从不移动面板**，那一下就是抢跑。
+    /// - 这个检查每次重绘都会跑（含流光的 15fps 帧），没变化时只是一次数值比较，开销可忽略。
+    ///   因为只在 x 变化时才动手，而 x 的**最后一次**变化必然就是排版完成，所以一次到位、
+    ///   不需要去抖、预测或事后校正。
+    /// - 唯一例外：w 与 x 是系统的两个属性、两次更新，极快连点（间隔 <20ms）时本拍可能读到
+    ///   "新 x + 旧 w"，所以定位前**再读一次** frame。
     /// - 这里**不做位移动画**（曾经用 CVDisplayLink 逐帧插值锚点做过，已按需求回滚）：
     ///   `popover.show` 到新锚点是一帧到位。想要平滑滑动只能放弃 `NSPopover` 自绘面板。
     private func syncPanelAnchor() {
         guard let button = statusItem.button, let win = button.window else { return }
         let frame = win.frame
-        let frameChanged = (lastSeenStatusWindowFrame != frame)
-        lastSeenStatusWindowFrame = frame
+        let xMoved = (lastSeenStatusWindowX != nil && lastSeenStatusWindowX != frame.minX)
+        lastSeenStatusWindowX = frame.minX
 
-        guard isPanelOpen else { return }
+        guard isPanelOpen, xMoved else { return }
 
-        // 兜底：窗口持续变化时去抖等不到"稳定"，到点就按当前值强制定位一次
-        enforceAnchorDeadlineIfNeeded()
-
-        if frameChanged {
-            // 命中"系统还会再改一次 x"的规律时，直接按最终 x 定位，一次到位。
-            // 判据只看"宽度变了"——宽度的变化本身就说明系统还在排版，那就是中间态。
-            // ⚠️ 不要要求"右边缘与上一拍严格相等"：图标**减少**的方向上系统会先带一个
-            // 约 −5pt 的偏移（实测右边缘 1223→1218），条件一严格就漏判，
-            // 面板便会被系统按中间态挪走——用户看到的正是"面板往右移时会先向左跳一下"。
-            if let shown = lastStatusWindowFrame,
-               frame.width != shown.width {
-                var predicted = frame
-                predicted.origin.x = shown.minX + shown.width - frame.width
-                predictedSettledFrame = predicted
-                lastSeenStatusWindowFrame = predicted
-                pendingAnchorWork?.cancel()
-                pendingAnchorWork = nil
-                pendingAnchorSince = nil
-                showPanel(at: predicted, button: button)
-                return
-            }
-            // 没有把握就只能等：已经有待执行的任务就**不要重置计时**，
-            // 稳定 `anchorSettleDelay` 后自然执行。反复刷新的话，在 15fps 重绘下
-            // 会永远等不到（每 67ms 就被推后一次）。
-            // 到这里说明当前 frame 没有被预测覆盖，预测要么已过期要么是错的——丢掉。
-            predictedSettledFrame = nil
-            if pendingAnchorWork == nil {
-                if pendingAnchorSince == nil { pendingAnchorSince = Date() }
-                scheduleAnchorWork()
-            }
-            return
-        }
-
-        // 窗口已经稳定在这个 frame：如果上次定位用的不是它，才需要补一次定位。
-        guard lastStatusWindowFrame != frame else { return }
-        if pendingAnchorWork == nil {
-            if pendingAnchorSince == nil { pendingAnchorSince = Date() }
-            scheduleAnchorWork(delay: 0)
-        }
+        // x 变了：排版已落定。**重新读一次** frame 再用——w 和 x 是系统两个属性、
+        // 两次更新，本拍可能读到"新 x + 旧 w"（极快连点时会遇到），直接用会算错中心。
+        showPanel(at: button.window?.frame ?? frame, button: button)
     }
 
-    /// 安排一次（去抖后的）重新锚定。延迟执行期间若已有任务在等，不重复安排。
-    private func scheduleAnchorWork(delay: TimeInterval? = nil) {
-        guard pendingAnchorWork == nil else { return }
-        let wait = delay ?? anchorSettleDelay
-        let work = DispatchWorkItem { [weak self] in self?.runPendingAnchorWork() }
-        pendingAnchorWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
-    }
-
-    private func runPendingAnchorWork() {
-        pendingAnchorWork = nil
-        pendingAnchorSince = nil
-        guard isPanelOpen, let btn = statusItem.button else {
-            return
-        }
-        // 优先用预测的落定 frame；没有预测就用当前 frame（此时窗口已经稳定）
-        let settled = predictedSettledFrame ?? btn.window?.frame ?? .zero
-        predictedSettledFrame = nil
-        // 已经对着这个 frame 定位过（比如等待期间帧又回到原样）就不用再动
-        guard lastStatusWindowFrame != settled || lastSeenStatusWindowFrame != settled else {
-            return
-        }
-        showPanel(at: settled, button: btn)
-    }
 
     /// 以给定的状态栏窗口 frame 为中心重新锚定面板（一次到位，不做动画）。
     ///
-    /// ⚠️ **面板已经显示时，`popover.show` 有时会被系统整个忽略**（2026-09-16 实测：
-    /// 状态栏窗口刚被系统挪过之后，系统认为"面板还在正确位置"，调用前后面板 frame
-    /// 完全相同）。所以这里不是"调一次就完事"，而是把目标记下来、由
-    /// `startRelocateCorrection()` 反复校正到真的落位。
+    /// 只在 `syncPanelAnchor` 确认"系统排版已完成"之后调用，拿到的是最终值，
+    /// 不需要预测、去抖或事后校正。
     private func showPanel(at frame: NSRect, button btn: NSStatusBarButton) {
         let rect = anchorRect(for: btn)
         popover.show(relativeTo: rect, of: btn, preferredEdge: .minY)
         lastAnchorRect = rect
         lastStatusWindowFrame = frame
-        lastSeenStatusWindowFrame = frame
-        startRelocateCorrection(aimingAt: frame)
-    }
-
-    /// 面板没落到目标位置时，用 16ms 的定时器反复重新锚定（每次都用**最新**的
-    /// `button.bounds`，所以箭头始终居中），直到落位或超过 `relocateMaxDuration`。
-    ///
-    /// 为什么需要它：系统偶尔会吞掉 `popover.show`；单次重试也不够稳（实测会出现
-    /// "箭头不居中"）。持续校正能同时解决"跳一下"和"不居中"两个问题。
-    private func startRelocateCorrection(aimingAt winFrame: NSRect) {
-        let target = expectedPanelFrame(for: winFrame)
-        relocateTarget = target
-        if relocateDeadline == nil { relocateDeadline = Date().addingTimeInterval(relocateMaxDuration) }
-        guard relocateTimer == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.tickRelocateCorrection()
-        }
-        timer.tolerance = 0
-        RunLoop.main.add(timer, forMode: .common)
-        relocateTimer = timer
-    }
-
-    private func tickRelocateCorrection() {
-        guard isPanelOpen, let btn = statusItem.button, let target = relocateTarget else {
-            stopRelocateCorrection(); return
-        }
-        let current = popover.contentViewController?.view.window?.frame
-        let reached = current.map { abs($0.minX - target.minX) < 1 } ?? false
-        if reached || Date() >= (relocateDeadline ?? Date()) {
-            stopRelocateCorrection(); return
-        }
-        popover.show(relativeTo: anchorRect(for: btn), of: btn, preferredEdge: .minY)
-    }
-
-    private func stopRelocateCorrection() {
-        relocateTimer?.invalidate()
-        relocateTimer = nil
-        relocateTarget = nil
-        relocateDeadline = nil
-    }
-
-    /// 给定的状态栏窗口 frame 对应的"面板应当落到的位置"（面板宽 368，箭头对准窗口中心）。
-    ///
-    /// ⚠️ 必须传入**我们认为系统最终会稳定到的那个 frame**，不能在这里重新读
-    /// `statusItem.button?.window?.frame`：系统的窗口变动与我们的检测不同步，
-    /// 实测重新读会读到"中间态"（mid=1086），算出的目标把面板校正到错误位置
-    /// （表现为"箭头不居中"）。
-    private func expectedPanelFrame(for winFrame: NSRect) -> NSRect? {
-        guard winFrame.width > 0 else { return nil }
-        let panelWidth = popover.contentViewController?.view.window?.frame.width ?? 368
-        var f = winFrame
-        f.origin.x = winFrame.midX - panelWidth / 2
-        return f
-    }
-
-    /// 兜底：万一窗口长时间持续变化，去抖会一直等不到"稳定"，
-    /// 到 `anchorMaxDefer` 就按当前值强制定位一次，避免完全不跟随。
-    private func enforceAnchorDeadlineIfNeeded() {
-        guard let since = pendingAnchorSince,
-              Date().timeIntervalSince(since) >= anchorMaxDefer
-        else { return }
-        pendingAnchorWork?.cancel()
-        pendingAnchorWork = nil
-        runPendingAnchorWork()
+        lastSeenStatusWindowX = frame.minX
     }
 
     func popoverDidShow(_ notification: Notification) {
@@ -471,12 +303,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         isPanelOpen = false
-        stopRelocateCorrection()
-        // 丢掉还没执行的重新锚定任务，并清掉观测基准：下次打开时重新按当时的窗口算
-        pendingAnchorWork?.cancel()
-        pendingAnchorWork = nil
-        pendingAnchorSince = nil
-        lastSeenStatusWindowFrame = nil
+        // 清掉观测基准：下次打开时重新按当时的窗口算
+        lastSeenStatusWindowX = nil
         lastAnchorRect = nil
         finishAnimation()
         // 释放面板视图：不释放的话它会一直跟着数据每秒重绘，
