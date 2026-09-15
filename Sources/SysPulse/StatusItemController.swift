@@ -54,6 +54,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// −31.5 与 −474.5）。如果直接用"这一次"的 minX 判断余量，就会把系统的过渡位置
     /// 当成"完全放不下"而误降档。用最近几次的最大值既保守又抗这种瞬时跳变。
     private var recentMinX: [CGFloat] = []
+    /// 降档判据用的采样窗口（拍）：**变挤要连续两拍才算数**。
+    ///
+    /// 原先降档和升档共用"最近 5 拍取最大值"，抗瞬时跳变很稳，代价是**每次真的变挤都要等 5 拍**
+    /// ——实测"空间已经不够"到"真的换档"隔了 **9.93 秒**（刷新周期 2 秒），用户看到的就是
+    /// "该变双行了却半天不动"。改成 2 拍：任何**单拍**毛刺照样被吃掉（两拍取最大时，
+    /// 那个尖峰会被上一拍的旧值压住，实测 440pt 级的折叠区跳变也压得住），但反应只延迟一拍。
+    /// 升档仍用 5 拍（升上去放不下会被刘海整条吞掉，宁可保守）。
+    private let downgradeWindowSamples = 2
+    /// 三个档位的宽度是否已经用**完整数据**量过（见 `primeDensityWidths`）
+    private var didPrimeDensityWidths = false
+    /// 上次量宽度时的显示项组合：换显示项会改变各档宽度，要重新量
+    private var primedMetricSet: [Bool] = []
     /// 上一次升降档的时间：切换后先冷却一段时间再重新判定，避免自激
     private var lastDensityChangeAt: Date?
     private let densityCooldown: TimeInterval = 2.0
@@ -138,7 +150,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             }
             .store(in: &cancellables)
         if preferences.menuBarGlow { startGlowTimer() }
-
     }
 
     private func startGlowTimer() {
@@ -341,9 +352,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             density: densityOrder[index],
             glowPhase: preferences.menuBarGlow ? glowPhase : nil
         )
-        if let width = image?.size.width {
+        // 宽度记账（升档判据靠它算"更宽那档要多占多少"）：
+        // ⚠️ 数据还没到位那一次渲染里 GPU 段会**整段缺失**，量出来的宽度偏小
+        // （实测单行档 159pt vs 真实 213pt）。拿它当升档依据，会在**放不下**的时候把宽档
+        // 升上去（升降判据用的是"升档后的左边缘"，宽度算小了自然算得下），
+        // 结果窗口落进折叠区、完全不绘制，再花 5 拍退回来——实测 9.93 秒看不见图标。
+        let widthIsTrustworthy = !preferences.showGPU || snapshot.gpuUsage != nil
+        let metricSet = [preferences.showNetwork, preferences.showCPU, preferences.showMemory, preferences.showGPU]
+        if widthIsTrustworthy, !didPrimeDensityWidths || metricSet != primedMetricSet {
+            primeDensityWidths(with: snapshot, appearance: appearance, metricSet: metricSet)
+        }
+        if widthIsTrustworthy, let width = image?.size.width {
             densityWidths[index] = max(densityWidths[index], width)
         }
+
         // 上一次的图片宽度要在换图**之前**取：换档预测靠它求宽度差
         let previousImageWidth = lastRenderedImageWidth
         lastRenderedImageWidth = image?.size.width
@@ -445,6 +467,26 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         lastStatusWindowFrame = predicted
     }
 
+    /// 用**一次完整快照**把三个档位的宽度一次性量准（只渲染取尺寸，不显示）。
+    ///
+    /// 为什么不能只靠"渲染到哪档量哪档"：启动第一次渲染时数据还没到位（GPU 段缺失 → 宽度偏小），
+    /// 而升档判据必须先知道"更宽那档要多占多少"。量不准就会在放不下的时候升上去（见调用处注释）。
+    /// 另外宽档不渲染就永远量不到（README bug 3 的坑），所以这里**主动**把三档都渲一遍。
+    private func primeDensityWidths(with snapshot: MetricsSnapshot, appearance: NSAppearance?, metricSet: [Bool]) {
+        for (index, density) in densityOrder.enumerated() {
+            let image = MenuBarImage.render(
+                snapshot: snapshot,
+                preferences: preferences,
+                appearance: appearance,
+                density: density
+            )
+            guard let width = image?.size.width else { continue }
+            densityWidths[index] = width
+        }
+        didPrimeDensityWidths = true
+        primedMetricSet = metricSet
+    }
+
     /// 用户选择的档位是「最宽上限」。「自动适应」从单行开始，放不下再逐级降。
     private var ceilingIndex: Int {
         switch preferences.menuBarLayout {
@@ -492,7 +534,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         let effectiveMinX = recentMinX.max() ?? window.frame.minX
 
         // 实测：刘海右侧还要再留约 40pt 余量，太贴近边缘时系统不会绘制
-        let slack = effectiveMinX - (safeArea.minX + 40)
+        let margin = safeArea.minX + 40
+        // 降档判据用**更短的窗口**（最近 2 拍）：单拍毛刺照样被吃掉（两拍取最大时尖峰会被
+        // 上一拍的旧值压住），但真的变挤只延迟 1 拍。
+        // 为什么不再用 5 拍：实测"空间已经不够"到"实际换档"整整隔了 **4~5 拍**
+        // （刷新 2 秒时 8~10 秒），用户看到的就是"该变双行了却半天不动"。
+        // 升档仍用 5 拍（`effectiveMinX`）——升上去放不下会被刘海整条吞掉，宁可保守。
+        let downgradeSlack = (recentMinX.suffix(downgradeWindowSamples).max() ?? window.frame.minX) - margin
+
 
         // 刚切换过就等一会儿再判：切换会立刻改变图标宽度和左边缘，
         // 紧接着的那次测量是"切换中的过渡值"，拿它做决策必然自激。
@@ -511,7 +560,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         //    降级判断依赖"下一档的图标宽度"，而没渲染过的档位宽度是 0（未知）；
         //    一路降就会跳过中间档，导致那一档永远没被测量、之后再也升不回去
         //    （实测表现：冷启动后一路卡在极简档，两行档的宽度始终是 0）。
-        if slack < 0, target < densityOrder.count - 1 {
+        if downgradeSlack < 0, target < densityOrder.count - 1 {
             target += 1
         }
         // ② 想升档：要求"当前档"与"更宽那一档"**都已测量**（未测量的宽度是 0，
@@ -529,7 +578,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             // 实测反例：两行档时 minX=1072（余量 84.5，看着够），但升到单行要多占 108，
             // 左边缘落到 964 —— 比要求的 988 还靠左 24pt，属于画不出来的区域。
             // 用旧写法（`slack > gain + buffer`）就会误升，结果单行整条被刘海吞掉。
-            let margin = safeArea.minX + 40
             if gain > 0, effectiveMinX - gain >= margin + densityUpgradeBuffer {
                 target = wider
             }
@@ -541,6 +589,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         }
 
     }
+
 
     // MARK: -
 
