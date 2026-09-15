@@ -10,14 +10,19 @@
 
 ## 0. 一句话现状
 
-**面板换档跳动的根因已经钉死，但只修好了一半。**
+**「面板换档跳动」已经修好并真机验证（2026-09-16 晚），当前没有已知的功能性 bug。**
 
-- **图标增加（面板左移）→ 正常**；**图标减少（面板右移）→ 仍会反向跳一下**（一帧左右）。
-- 根因：换档时**系统自己会移动面板**（用"新宽度 + 旧 x"算出的中间态位置）。
-  减少方向上那个位置离正确位置差 45pt、看得见；增加方向上恰好等于最终位置、看不出来。
-- 当前代码（`5b6a0f7` = `99febbe` 内容）判据是"只看状态栏窗口的 x 变化"，
-  已解决增加方向；**减少方向为什么仍跳、以及"系统为什么出手"，还没做直接验证**。
-- **下一步实验方案写在 `DEVLOG` 第 4 节**，别从零重来。
+- 根因（已有逐毫秒实测）：换档时**系统自己会挪面板**，用的是「**旧 x + 新宽度**」这个中间态。
+  - 图标**减少**：算出的位置离正确位置差 **45pt** → 看得见地"先反向跳一下"；
+  - 图标**增加**：**系统根本不挪面板**（本次新发现）→ 只有箭头滞后、没有跳。
+- 修法（`StatusItemController.reanchorForPredictedResize()`）：**宽度一变就用"右边缘守恒"
+  预测最终 x、当场重新锚定**，抢在错误那一帧被画出来之前；`syncPanelAnchor()` 仍在 x 就位后精确兜底。
+- 验证：错误位置暴露 **218.5ms（被画出来 8 次）→ 12.1ms（一次都没被画出来）**；
+  预测 4/4 精确命中系统最终 x。完整数据、探针配方、残留边界都在
+  `DEVLOG-面板跳动-2026-09-16.md` **第 7 节**。
+- **唯一残留**：面板开着时"排版档位"发生极端跳变（宽度缩到不足原来 2/3，例如单行→极简）时，
+  预测的锚点会越出按钮范围、被系统忽略，回落到旧路径（错误位置约 43ms）。
+  切显示项够不着这个条件。要不要彻底解决见 DEVLOG 7.6。
 
 其余功能（面板排版、菜单选完收面板、流光、箭头跟随）都正常。
 
@@ -40,9 +45,16 @@
 ## 2. 当前状态（可直接核对）
 
 - 运行中，偏好：四项指标全开 · 自动排版（`auto`）· 刷新 1 秒 · 流光开启
-- 编译 **0 错误 0 告警**；源码里**没有任何调试代码**（`grep -rn "AUTO_\|TRACE\|/tmp/" Sources/` 为空）
+- 编译 **0 错误 0 告警**；源码里**没有任何调试代码**
+  （`grep -rn "PanelTrace\|SYSPULSE_\|AUTO_\|TRACE\|/tmp/" Sources/` 为空）
 - 空闲开销 **0.13% CPU / 50.6 MB**（流光本身约 +0.11%；面板开过一次后内存 +38MB 由 AppKit 持有）
-- 这一轮的改动只集中在 `StatusItemController.swift`（`syncPanelAnchor` 一带）
+- 这一轮的改动只集中在 `StatusItemController.swift`
+  （新增 `reanchorForPredictedResize()`、`lastRenderedImageWidth`；`updateStatusItem` 里多一次调用）
+- ⚠️ **实验期间改过的偏好要还原**：探针的 `SYSPULSE_LAYOUT` 会真的写进
+  `~/Library/Preferences/com.local.syspulse.plist`。跑完记得
+  `pkill -f SysPulse.app/Contents/MacOS/SysPulse` → `defaults write com.local.syspulse
+  menuBarLayout -string auto` → `open /Applications/SysPulse.app`
+  （**运行中改 `defaults` 无效**，必须先退出）。
 
 ## 3. 今天做完的事（都已验证）
 
@@ -81,26 +93,29 @@
   3. 判据用 `popover.isShown` → 开合动画期间滞后，把对齐整段跳过
 - **位移动画已按用户要求回滚**（`animatePanel` 已删除）
 
-### 3.5 换档时面板跳一下 —— **根因已钉死，减少方向仍未解决**
+## 3.5 换档时面板跳一下 —— **已修好（2026-09-16 晚）**
 
-**现象**：面板开着时关掉「网速」（图标减少、面板右移），箭头**先反向跳一下**；
+**现象（用户报的）**：面板开着时关掉「网速」（图标减少、面板右移），箭头**先反向跳一下**；
 开「网速」（图标增加）则正常。
 
-**已钉死的因果（均有对照实验，详见 `DEVLOG` 第 2 节）**：
-1. 系统换档时**分两段**改状态栏窗口：先改**宽度**（x 不动，且会先 ±2pt 微调），
-   约 15~30ms 后才改 **x**。
-2. **系统会自己移动面板**（`NSWindow.didMoveNotification` + 调用栈证实不是我发起的），
-   用的是 `旧 x + 新宽度/2` 这个**算错的中间态**：减少方向算出 902（正确是 947），
-   增加方向算出 924（恰好就是最终位置）。
-3. `popover.show` 有两个坑：**面板已显示时可能被系统整个吞掉**（实测 `before=902 after=902`）；
-   **面板 alpha=0 时连调用都不返回**。
+**钉死的因果（逐毫秒探针实测，`DEVLOG` 第 7 节有完整数据）**：
+1. 系统换档时**分两段**改状态栏窗口：先改**宽度**（x 不动），约 15~30ms 后才改 **x**。
+2. 系统在**改宽度那一刻**就把面板按「**旧 x + 新宽度/2**」重摆一次 ——
+   减少方向摆到 903（正确 948，差 45pt，**这就是那一下**）；
+   **增加方向系统不摆**（窗口 184→229、x 1040→995，面板全程没动），所以那边只有滞后、没有跳。
+3. 右边缘守恒：换档前后状态栏窗口右边缘恒为 1224（两方向 × 四次全成立）。
 
-**当前修法**：`syncPanelAnchor` 判据改成**只看 x 变化**（x 的最后一次变化才代表排版完成），
-定位前再读一次 frame。代码 473 行，去抖/预测/校正全部删除。
+**修法**（`reanchorForPredictedResize`，在 `updateStatusItem` 里设完 `button.image` 之后立刻调用）：
+宽度一变就算 `最终 x = 上次定位用的右边缘 − 新宽度`，用这个**预测中心**当锚点当场 `show` 一次
+（锚点是 1pt 矩形，坐标从屏幕换算到按钮当前坐标系）。
+⚠️ 参考值必须用 `lastStatusWindowFrame`（上次真正定位用的），**不能现读 `button.window.frame`**——
+那一刻它正是中间态。
+`syncPanelAnchor()` 保留：它管"最终一定精确"和"别的 App 图标变化导致窗口移动"。
+两条路径顺序不能反（先预测、后 sync），否则会被 sync 的 x 判据用中间态覆盖。
 
-**验证**：图标增加方向 `979 → 924` 一步到位；图标减少方向仍有约一帧的中间态（`902`）。
+**验证**：同一 2×2 矩阵，错误位置暴露 218.5ms / 被画出来 8 次 → **12.1ms / 0 次**；预测 4/4 精确命中。
 
-**走过的弯路（别再走）**：去抖 60/120ms、右边缘守恒预测、16ms 定时器校正、
+**走过的弯路（别再走）**：去抖 60/120ms、只等 x 变化、16ms 定时器校正、
 "收面板稳定后重开"（用户明确否决）、"alpha=0 隐藏"（技术上不可行）。
 共同错误是都在回答"我该什么时候喊 `show`"，没问"**为什么系统要摆那一下**"。
 
@@ -139,26 +154,44 @@
 
 ## 6. 已知的其他问题 / 待办
 
-1. **图标减少时面板仍跳一下**（当前第一优先）。要验证的假设与实验方案见
-   `DEVLOG-面板跳动-2026-09-16.md` 第 4 节：需要抓"系统挪面板那一刻
-   `button.window.frame` 到底是旧 x 还是新 x"，并补全 2×2（起手档位 × 变化方向）对照。
-2. **单行档 / 极简档的网速段宽度会随数值变**（159pt ↔ 213pt），两行档正常；
-   `Tools/LayoutProbe` 可复现；README 已记为已知缺陷。
+1. **（已解决 ✅）图标减少时面板跳一下** —— 2026-09-16 晚修好并真机验证，
+   机制/数据/探针配方见 `DEVLOG-面板跳动-2026-09-16.md` 第 7 节。
+   **残留**：面板开着时排版档位发生极端跳变（宽度缩到不足原来 2/3）时预测无法表达，
+   回落到旧路径（错误位置约 43ms）；要不要彻底解决见 DEVLOG 7.6。切显示项不受影响。
+2. **（已澄清 ❌ 不是 bug）单行档 / 极简档的网速段宽度** —— 旧文档说它"随数值变（159 ↔ 213pt）"，
+   实测**不成立**：四项指标齐全时三档宽度在 27 组取值下漂移 **0.0pt**。
+   旧结论是 `Tools/LayoutProbe` 的探针 bug（`narrowestSnapshot()` 没设 `gpuUsage`，
+   而它是 `Double?`，于是"全零"那组整个 GPU 段消失）。**探针已修**，详见 DEVLOG 7.7。
+   这一条可以从待办里划掉了。
 3. **箭头对准的是"状态栏窗口中心"**，而图标**可见内容**中心比窗口中心偏右约 21pt
    （系统渲染图片的位置特性，与代码无关）。用户未提出，未处理。
 4. 版本管理现在有 git 了，`Backups/` 里的文件副本可以不再依赖；
    本轮各版本索引见 `DEVLOG` 第 6 节。
 
-## 7. 复现"面板反向跳"的调试配方（下次改这块时直接用）
+## 7. 复现"面板反向跳"的调试配方（2026-09-16 晚已跑通，直接用）
 
-1. 在 `StatusItemController` 里**临时**加：`SYSPULSE_TRACE=1` 时把
-   ①每次 `popover.show` 的 rect/时间戳、②状态栏窗口 frame、③`popover` 窗口 frame
-   （**用一个 3ms 的 `DispatchSourceTimer` 采样**）写成一行行日志；
-   再加一个 `SYSPULSE_AUTO_TOGGLE_DELAY/INTERVAL` 钩子在 App 内切换 `preferences.showNetwork`
-   （合成点击进不了 popover，这是唯一能自动复现"面板开着时换档"的办法）。
-2. 装到 `/Applications`，用 `open --env SYSPULSE_TRACE=1 --env SYSPULSE_TRACE_FILE=/tmp/t.txt
-   --env SYSPULSE_AUTO_TOGGLE_DELAY=4 /Applications/SysPulse.app` 启动；
-   用 `Tools/Clicker <图标中心x> 12` 点开面板。
-3. 把日志按 `x` 变化点抽出来看轨迹：**是否存在一个既不是起点也不是终点的 x**。
-4. 验证完**把诊断代码全部删掉**（`grep -rn "AUTO_\|TRACE\|/tmp/" Sources/` 必须为空），
-   再 `./build.sh` 重编。
+1. 在 `StatusItemController` 里**临时**加一个探针文件（那一版叫 `PanelTrace.swift`，
+   **验证完已删除**，需要时按下面三条通道重建）：
+   1. **`NSWindow.didMove/didResize` 通知**（面板窗口 + 状态栏窗口）——
+      在回调里**同步读另一个窗口的 frame**：这是回答"系统挪面板那一刻窗口是什么值"的关键，
+      不受采样间隔限制；
+   2. **3ms `DispatchSourceTimer` 采样**两个窗口的 frame，只在有变化时写一行（日志天然是轨迹）；
+   3. 每次 `popover.show` 前后的面板 frame。
+   再加环境变量钩子：`SYSPULSE_OPEN_AT`（自动开面板）、`SYSPULSE_TOGGLE_AT/_2_/_3_/_4_`
+   + `_TO=on|off`（自动切「网速」）、`SYSPULSE_LAYOUT` / `SYSPULSE_LAYOUT2_AT`（钉死/切换排版档位）、
+   `SYSPULSE_KEEP_OPEN=1`（面板被外部点击收掉就重开 —— **人一碰鼠标面板就会收掉，不加这个整轮作废**）。
+2. **不要用 `open --env`**：实测本机环境变量传不进去（trace 文件根本不出现）。直接 exec：
+   ```bash
+   pkill -f "SysPulse.app/Contents/MacOS/SysPulse"
+   SYSPULSE_TRACE=$PWD/build/trace.txt SYSPULSE_LAYOUT=auto SYSPULSE_KEEP_OPEN=1 \
+     SYSPULSE_OPEN_AT=4 SYSPULSE_TOGGLE_AT=7 SYSPULSE_TOGGLE_TO=off \
+     SYSPULSE_TOGGLE2_AT=11 SYSPULSE_TOGGLE2_TO=on \
+     /Applications/SysPulse.app/Contents/MacOS/SysPulse &
+   ```
+   （日志写在工程目录里，不要用 `/tmp`；`build/trace-run*.txt`、`build/final-*.txt` 是本次原始数据。）
+3. 判据两条：**①错误位置累计时长**（按"系统挪的那一下 → 我们纠正的那一下"积分）；
+   **②是否被 3ms 采样在 runloop 边界观测到** —— 后者才等于"有没有真被画出来"。
+   只在同一轮 runloop 内闪现的值不会进采样，也不会被提交到屏幕。
+4. 验证完**把诊断代码全部删掉**（`grep -rn "PanelTrace\|SYSPULSE_\|AUTO_\|TRACE\|/tmp/" Sources/`
+   必须为空），`./build.sh` 重编，**并把实验改过的偏好还原**
+   （`menuBarLayout` 会被探针写进 plist：先 `pkill`、再 `defaults write`、再 `open`）。

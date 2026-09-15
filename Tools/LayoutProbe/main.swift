@@ -1,5 +1,16 @@
 // 排版探针：用真实源码量出三档菜单栏图片的宽度，核对 README 里写的数值。
 //
+// ⚠️ 命令行工具链（CommandLineTools）缺 SwiftUIMacros 插件，**直接把
+// `StatusItemController.swift` 编进来会失败**（它在 `popover` 那几行用到了 SwiftUI 的类型推断）。
+// 两个可用配方，二选一：
+//
+//   # ① 命令行工具链：用 Stub.swift 顶掉 MenuBarImage 唯一依赖的 StatusItemController.tint(for:)
+//   swiftc -O -framework IOKit -framework AppKit -framework SwiftUI -framework ServiceManagement \
+//       -target arm64-apple-macosx14.0 -o build/LayoutProbe \
+//       Sources/SysPulse/{Monitors,Formatting,Preferences,MenuBarImage,SystemMonitor,LaunchAtLogin}.swift \
+//       Tools/LayoutProbe/Stub.swift Tools/LayoutProbe/main.swift
+//
+//   # ② 完整 Xcode 环境：直接把真文件编进来（Stub.swift 不要带，会符号重复）
 //   swiftc -O -framework IOKit -framework AppKit -framework SwiftUI \
 //       -o build/LayoutProbe \
 //       Sources/SysPulse/{Monitors,Formatting,Preferences,MenuBarImage,StatusItemController,LaunchAtLogin,SystemMonitor}.swift \
@@ -7,6 +18,9 @@
 //
 // 注意：StatusItemController.swift 里持有 NSPopover / NSStatusItem，这里只是把它作为
 // 依赖编进来（MenuBarImage 引用它的 tint(for:)），不会实例化。
+//
+// ⚠️ 2026-09-16：本工具曾经"证明"了单行/极简档的宽度会随数值变（159 ↔ 213pt），
+// 那是**探针自己的 bug**（见 `narrowestSnapshot`），源码排版其实是恒定的。改完请复测。
 
 import AppKit
 import Foundation
@@ -24,8 +38,16 @@ func widestSnapshot() -> MetricsSnapshot {
 }
 
 /// 造一个"最窄"的快照：全部读数为 0，用来确认宽度不随数值变化。
+///
+/// ⚠️ **`gpuUsage` 必须显式赋值**：它是 `Double?`，不赋值就是 `nil`，
+/// `MenuBarImage.buildRows` 会把整个 GPU 段**去掉**——于是"最窄"那组比"最宽"那组少一整段，
+/// 量出来的差值（full 54pt / minimal 23pt）是"少了一段"而不是"数值变化"。
+/// 2026-09-16 就是这么误判过，还写进了 README 的「已知缺陷」。四项指标要么都给、要么都不给。
 func narrowestSnapshot() -> MetricsSnapshot {
     var s = MetricsSnapshot()
+    s.cpuUsage = 0
+    s.memoryFraction = 0
+    s.gpuUsage = 0          // ← 不能省
     s.downSpeed = 0
     s.upSpeed = 0
     return s

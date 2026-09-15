@@ -32,6 +32,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var lastSeenStatusWindowX: CGFloat?
     /// 上一次**真正用于定位**的窗口 frame。
     private var lastStatusWindowFrame: NSRect?
+    /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
+    private var lastRenderedImageWidth: CGFloat?
     /// 动画进行中收到的点击先记账，等动画结束再补上，避免被系统忽略
     private var pendingToggle = false
     private var isAnimating = false
@@ -342,6 +344,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         if let width = image?.size.width {
             densityWidths[index] = max(densityWidths[index], width)
         }
+        // 上一次的图片宽度要在换图**之前**取：换档预测靠它求宽度差
+        let previousImageWidth = lastRenderedImageWidth
+        lastRenderedImageWidth = image?.size.width
         button.image = image
         button.imagePosition = .imageOnly
         button.toolTip = MenuBarImage.tooltip(snapshot: snapshot)
@@ -362,7 +367,82 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 升档发生在渲染之后，那次检查时窗口还是旧位置，之后就再没机会对齐
         // （实测偏差停在 +107.5pt，正是用户看到的"箭头还留在两行档的中间"）。
         // 做成每次重绘都跑的幂等操作后，窗口无论什么时候挪到位，下一拍就追上。
+        //
+        // 顺序有讲究：**先按预测抢在系统摆错位置那一帧之前定位**（宽度刚变、x 还没就到），
+        // 再走下面这套"等 x 变化后精确纠正"。反过来会被后者的中间态判据覆盖。
+        reanchorForPredictedResize(
+            previousImageWidth: previousImageWidth,
+            newImageWidth: image?.size.width,
+            button: button
+        )
         syncPanelAnchor()
+    }
+
+    /// 换档那一瞬间就按**预测的最终位置**把面板重新锚定好，抢在"系统用中间态摆错位置"
+    /// 那一帧之前。
+    ///
+    /// 为什么需要它（2026-09-16 逐毫秒实测，数据见 `DEVLOG-面板跳动-2026-09-16.md` 第 7 节）：
+    ///
+    /// 系统改状态栏窗口宽度时会**当场**把这个面板按「**旧 x + 新宽度**」重摆一次
+    /// （实测 `995 + 184/2 = 1087` → 面板被摆到 **903**），而窗口的 x 要再过 15~30ms
+    /// 才挪到最终位置（真正的中心是 `1040 + 92 = 1132` → 面板该在 **948**）。
+    /// 也就是说系统摆的那一下**差 45pt**，而且它是"宽的一侧"——因为面板右移时
+    /// 系统却拿旧 x 算中心，于是**先向左跳**。
+    ///
+    /// 而只等 x 变化的旧逻辑要等到"看见 x 变化之后的下一拍重绘"才纠正：实测晚了
+    /// **52ms**（流光帧 15fps 的粒度；**流光关掉时更是要等下一次数据刷新，最长 1 秒**），
+    /// 那 45pt 的错误位置就被真真切切画出来了 —— 这就是用户看到的"反向跳一下"。
+    ///
+    /// 另一个方向（图标增加、窗口变宽）系统**根本不挪面板**（实测两次都没挪），
+    /// 所以那里只有"箭头滞后"没有"跳"，用户看到的是正常的一次移动。
+    ///
+    /// **为什么敢预测**：状态栏项的**右边缘在换档前后守恒**（实测 `1224 → 1224`，
+    /// 增加/减少两个方向、四次切换全部成立）。右边缘由菜单栏从右往左的排版决定，
+    /// 本项自己变宽变窄不影响它。于是：
+    ///
+    /// ```
+    /// 最终 x = 换档前的右边缘 − 新宽度
+    /// ```
+    ///
+    /// ⚠️ 参考值必须是**上一次真正用于定位的 frame**（`lastStatusWindowFrame`），
+    /// **不能现读 `button.window.frame`**——这一刻它正是中间态（旧 x + 新宽度），
+    /// 拿它当参考就等于复刻系统的错误。万一预测没命中（右边缘真的动了），
+    /// `syncPanelAnchor` 还会在 x 就位后再精确纠正一次，所以这里错一点也不会留疤。
+    private func reanchorForPredictedResize(previousImageWidth: CGFloat?, newImageWidth: CGFloat?, button: NSStatusBarButton) {
+        guard isPanelOpen,
+              let previousImageWidth, let newImageWidth,
+              abs(newImageWidth - previousImageWidth) > 0.01,
+              let reference = lastStatusWindowFrame,
+              let window = button.window
+        else { return }
+
+        // 窗口宽度跟着图片宽度走（实测恒为「图片宽度 + 16」），所以宽度差可以直接搬到窗口上
+        let predictedWidth = reference.width + (newImageWidth - previousImageWidth)
+        let predicted = NSRect(
+            x: reference.maxX - predictedWidth,
+            y: reference.minY,
+            width: predictedWidth,
+            height: reference.height
+        )
+
+        // 锚点矩形取在**预测出来的中心**上。此刻窗口还是中间态，所以坐标要用它换算：
+        // 预测中心在 button 坐标系里的位置 = 预测中心（屏幕）− 窗口当前 minX。
+        // 无论系统有没有把新宽度应用上去，窗口的 x 都还是旧值，所以这个换算是对的。
+        let localX = predicted.midX - window.frame.minX
+
+        // ⚠️ 锚点必须落在按钮范围内，否则系统会**静默忽略**这次 show。
+        // 实测：排版档位从「单行」跳到「极简」（窗口 229 → 88）时预测中心落在 localX=185，
+        // 从极简跳回单行时落在 localX=−26.5，两次 `show` 都没生效（面板停在系统摆的位置）。
+        // 判据 `旧宽度 > 1.5 × 新宽度` 时就会越界 —— 也就是说**只有"宽度缩到不足原来 2/3"
+        // 的极端换档**（现实中只可能是排版档位变了，不是切显示项）会落到这里；
+        // 那时交给 `syncPanelAnchor` 在 x 就位后兜底纠正，与改动前的行为一致。
+        guard localX >= 0.5, localX <= button.bounds.width - 0.5 else { return }
+
+        let rect = NSRect(x: localX - 0.5, y: 0, width: 1, height: button.bounds.height)
+        popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
+
+        lastAnchorRect = rect
+        lastStatusWindowFrame = predicted
     }
 
     /// 用户选择的档位是「最宽上限」。「自动适应」从单行开始，放不下再逐级降。
@@ -461,6 +541,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         }
 
     }
+
+    // MARK: -
 
     /// 占用越高颜色越警示，平时保持系统主色以适配浅色 / 深色菜单栏。
     static func tint(for fraction: Double) -> NSColor {
