@@ -32,6 +32,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var lastSeenStatusWindowX: CGFloat?
     /// 上一次**真正用于定位**的窗口 frame。
     private var lastStatusWindowFrame: NSRect?
+    /// 正在跑的面板位移动画（nil = 没有）
+    private var anchorAnimation: PanelAnchorAnimation?
+    /// 面板位移动画时长：0.18 秒（用户 2026-09-16 选定）。
+    /// ⚠️ 代价是"换档到位"从 0.07 秒变成约 0.25 秒——观感更丝滑，但跟手感略降。
+    /// 这就是上一版把动画回滚掉的原因，这次是用户明确要求加回来的。
+    private let anchorAnimationDuration: CFTimeInterval = 0.18
     /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
     private var lastRenderedImageWidth: CGFloat?
     /// 动画进行中收到的点击先记账，等动画结束再补上，避免被系统忽略
@@ -303,11 +309,52 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 只在 `syncPanelAnchor` 确认"系统排版已完成"之后调用，拿到的是最终值，
     /// 不需要预测、去抖或事后校正。
     private func showPanel(at frame: NSRect, button btn: NSStatusBarButton) {
-        let rect = anchorRect(for: btn)
-        popover.show(relativeTo: rect, of: btn, preferredEdge: .minY)
-        lastAnchorRect = rect
         lastStatusWindowFrame = frame
         lastSeenStatusWindowX = frame.minX
+        movePanel(arrowTo: frame.midX, button: btn)
+    }
+
+    /// 让面板的箭头对准屏幕横坐标 `screenX`（一次性摆好，不做动画）。
+    ///
+    /// 锚点用一个 1pt 的矩形表达：系统把面板**居中在锚点矩形上**，所以矩形中心就是箭头位置。
+    /// ⚠️ 矩形必须落在按钮范围内，否则系统的 `show` 会被**静默忽略**（2026-09-16 实测）。
+    @discardableResult
+    private func placePanel(arrowAt screenX: CGFloat, button: NSStatusBarButton) -> Bool {
+        guard let window = button.window else { return false }
+        let localX = screenX - window.frame.minX
+        guard localX >= 0.5, localX <= button.bounds.width - 0.5 else { return false }
+        let rect = NSRect(x: localX - 0.5, y: 0, width: 1, height: button.bounds.height)
+        popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
+        lastAnchorRect = rect
+        return true
+    }
+
+    /// 平滑地把面板挪到新锚点（从面板**当前真实位置**起算，`anchorAnimationDuration` 秒 ease-out）。
+    ///
+    /// - 起点用面板当前的位置：换档时系统会先把面板按"旧 x + 新宽度"摆错一次，但那一帧
+    ///   还没提交就被我们接管（见 `reanchorForPredictedResize`），所以起点仍是换档前那个
+    ///   正确位置，不会出现"先跳一下再滑"；
+    /// - 重复调用 = **重新定向**：取消旧动画、从当前位置起算新目标，不会和目标打架；
+    /// - 已经在目标上（<0.5pt）就什么都不做，避免无意义的动画。
+    private func movePanel(arrowTo screenX: CGFloat, button: NSStatusBarButton) {
+        guard isPanelOpen, let panelWindow = popover.contentViewController?.view.window else { return }
+        let current = panelWindow.frame.midX
+        guard abs(current - screenX) > 0.5 else { return }
+        // 目标没变就别重启：换档时预测和"x 就位后的精确纠正"会先后提出**同一个**目标，
+        // 重启会把 180ms 的缓出重新计时（实测总时长被拉长到 243ms），而且中途速度会顿一下。
+        if let running = anchorAnimation, abs(running.target - screenX) <= 0.5 { return }
+        anchorAnimation?.cancel()
+        anchorAnimation = PanelAnchorAnimation(
+            from: current,
+            to: screenX,
+            duration: anchorAnimationDuration,
+            onFrame: { [weak self] x in
+                guard let self, let btn = self.statusItem.button else { return }
+                self.placePanel(arrowAt: x, button: btn)
+            },
+            onFinish: { [weak self] in self?.anchorAnimation = nil }
+        )
+        anchorAnimation?.start(in: panelWindow)
     }
 
     func popoverDidShow(_ notification: Notification) {
@@ -316,6 +363,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         isPanelOpen = false
+        anchorAnimation?.cancel()
+        anchorAnimation = nil
         // 清掉观测基准：下次打开时重新按当时的窗口算
         lastSeenStatusWindowX = nil
         lastAnchorRect = nil
@@ -460,11 +509,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 那时交给 `syncPanelAnchor` 在 x 就位后兜底纠正，与改动前的行为一致。
         guard localX >= 0.5, localX <= button.bounds.width - 0.5 else { return }
 
-        let rect = NSRect(x: localX - 0.5, y: 0, width: 1, height: button.bounds.height)
-        popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
-
-        lastAnchorRect = rect
         lastStatusWindowFrame = predicted
+        movePanel(arrowTo: predicted.midX, button: button)
     }
 
     /// 用**一次完整快照**把三个档位的宽度一次性量准（只渲染取尺寸，不显示）。
