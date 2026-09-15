@@ -91,8 +91,10 @@ struct DashboardView: View {
             HStack(spacing: 8) {
                 toggleChip("网速", isOn: preferences.showNetwork) { preferences.showNetwork.toggle() }
                 toggleChip("CPU", isOn: preferences.showCPU) { preferences.showCPU.toggle() }
-                toggleChip("内存", isOn: preferences.showMemory) { preferences.showMemory.toggle() }
+                // GPU 排在内存前面：与上方 CPU / GPU / 内存 三张卡片的顺序、以及菜单栏读数里
+                // `CPU … GPU … MEM …` 的顺序一致（2026-09-16 按需求把这两项调了个位置）。
                 toggleChip("GPU", isOn: preferences.showGPU) { preferences.showGPU.toggle() }
+                toggleChip("内存", isOn: preferences.showMemory) { preferences.showMemory.toggle() }
                 toggleChip("流光", isOn: preferences.menuBarGlow) { preferences.menuBarGlow.toggle() }
             }
             .padding(.top, 5)   // 标题行 7pt + 这里 5pt = 12pt，比卡片内「标题 / 进度条」再松一点
