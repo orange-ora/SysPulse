@@ -3,6 +3,7 @@ import Combine
 import SwiftUI
 
 
+
 /// 状态栏项 + 下拉面板的控制器。
 ///
 /// 位置由系统统一排版（从右往左挤），右侧空间不足时会自动降级成更窄的档位。
@@ -27,7 +28,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 用户看到的就是"箭头先反向跳一下"。所以改成"**一段时间内窗口完全不再变化**
     /// （`settleDelay`）"才算排版完成。
     private var settleWork: DispatchWorkItem?
-    private let settleDelay: TimeInterval = 0.12
+    private let settleDelay: TimeInterval = 0.03
     /// 上一次看到的状态栏窗口 frame（**只用于观测**是否变化，不作为"排版完成"的判据）
     private var lastSeenStatusWindowFrame: NSRect?
     /// 上一次**真正用于定位**的窗口 frame。
@@ -289,6 +290,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
                 let settled = btn.window?.frame ?? .zero
                 guard self.lastStatusWindowFrame != settled else { return }
                 self.showPanel(at: settled, button: btn)
+                // ⚠️ 系统**自己也会"纠正"偏离的面板**：换档时它会把面板挪到
+                // "新宽度 + 旧 x"算出的位置（实测 978→870/902，就是用户看到的反向跳）。
+                // 而 `popover.show` 在面板已显示时可能被它吞掉，所以紧接着再压一次，
+                // 确保最终停在按**已落定**窗口算出的正确位置。
+                let again = DispatchWorkItem { [weak self] in
+                    guard let self, self.isPanelOpen, let b = self.statusItem.button else { return }
+                    let target = b.window?.frame ?? .zero
+                    guard let current = self.popover.contentViewController?.view.window?.frame,
+                          abs(current.midX - target.midX) > 1 else { return }
+                    self.popover.show(relativeTo: self.anchorRect(for: b), of: b, preferredEdge: .minY)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: again)
             }
             settleWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay, execute: work)
@@ -306,7 +319,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 不需要预测、去抖或事后校正。
     private func showPanel(at frame: NSRect, button btn: NSStatusBarButton) {
         let rect = anchorRect(for: btn)
-        popover.show(relativeTo: rect, of: btn, preferredEdge: .minY)
         lastAnchorRect = rect
         lastStatusWindowFrame = frame
         lastSeenStatusWindowFrame = frame
