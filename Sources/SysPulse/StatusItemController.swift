@@ -21,15 +21,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var isPanelOpen = false
     /// 上一次 `popover.show` 用的锚点矩形，用来判断锚点是否真的动了
     private var lastAnchorRect: NSRect?
-    /// 窗口"稳定计时"：系统改状态栏窗口时，**w 和 x 是两个独立属性、更新顺序不固定**
-    /// （实测 x 会先微调 2pt、w 后到；反过来也有）。只要"看到某一维变了就动手"，
-    /// 就会用到"新 w + 旧 x"或"新 x + 旧 w"的混合态，算出的锚点中心是错的——
-    /// 用户看到的就是"箭头先反向跳一下"。所以改成"**一段时间内窗口完全不再变化**
-    /// （`settleDelay`）"才算排版完成。
-    private var settleWork: DispatchWorkItem?
-    private let settleDelay: TimeInterval = 0.12
-    /// 上一次看到的状态栏窗口 frame（**只用于观测**是否变化，不作为"排版完成"的判据）
-    private var lastSeenStatusWindowFrame: NSRect?
+    /// 上一次看到的状态栏窗口 **x**。
+    ///
+    /// 为什么只认 x、不认整个 frame：系统换档时**分两段**改状态栏窗口——
+    /// 先改**宽度**（x 不动），约 15ms 后才改 **x**。宽度变化只是排版中间态，
+    /// 这一刻算出的锚点中心（旧 x + 新宽度/2）是错的；**x 变化才代表排版完成**。
+    /// ⚠️ 踩过的坑：以前拿"frame 变了"当判据，于是在宽度刚变、x 还没跟上时就动手，
+    /// 面板先被摆到错误位置、再跳回正确位置——用户看到的就是"箭头先反向跳一下"。
+    /// 实测把所有 `show` 都关掉后系统**从不主动移动面板**，所以那一下确实是抢跑造成的。
+    private var lastSeenStatusWindowX: CGFloat?
     /// 上一次**真正用于定位**的窗口 frame。
     private var lastStatusWindowFrame: NSRect?
     /// 动画进行中收到的点击先记账，等动画结束再补上，避免被系统忽略
@@ -239,7 +239,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 初始定位用的是当前 frame：观测基准与定位基准一起记账，
         // 这样面板刚打开时不会被"误判成刚变化"而白等一次去抖。
         lastStatusWindowFrame = button.window?.frame
-        lastSeenStatusWindowFrame = button.window?.frame
+        lastSeenStatusWindowX = button.window?.frame.minX
         popover.contentViewController?.view.window?.makeKey()
     }
 
@@ -272,33 +272,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// - 这里**不做位移动画**（曾经用 CVDisplayLink 逐帧插值锚点做过，已按需求回滚）：
     ///   `popover.show` 到新锚点是一帧到位。想要平滑滑动只能放弃 `NSPopover` 自绘面板。
     private func syncPanelAnchor() {
-        guard let win = statusItem.button?.window else { return }
+        guard let button = statusItem.button, let win = button.window else { return }
         let frame = win.frame
-        let moved = (lastSeenStatusWindowFrame != frame)
-        lastSeenStatusWindowFrame = frame
+        let xMoved = (lastSeenStatusWindowX != nil && lastSeenStatusWindowX != frame.minX)
+        lastSeenStatusWindowX = frame.minX
 
-        guard isPanelOpen else { return }
+        guard isPanelOpen, xMoved else { return }
 
-        if moved {
-            // 窗口又动了：重新计时。等待期间**不动面板**，避免用"混合了两个属性"的中间态
-            // 算出错误中心（那正是"反向跳一下"的来源）。
-            settleWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, self.isPanelOpen, let btn = self.statusItem.button else { return }
-                self.settleWork = nil
-                let settled = btn.window?.frame ?? .zero
-                guard self.lastStatusWindowFrame != settled else { return }
-                self.showPanel(at: settled, button: btn)
-            }
-            settleWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay, execute: work)
-            return
-        }
-
-        // 窗口已经稳定：如果还没对着它定位过，补一次
-        guard lastStatusWindowFrame != frame, settleWork == nil else { return }
-        showPanel(at: frame, button: statusItem.button!)
+        // x 变了：排版已落定。**重新读一次** frame 再用——w 和 x 是系统两个属性、
+        // 两次更新，本拍可能读到"新 x + 旧 w"（极快连点时会遇到），直接用会算错中心。
+        showPanel(at: button.window?.frame ?? frame, button: button)
     }
+
 
     /// 以给定的状态栏窗口 frame 为中心重新锚定面板（一次到位，不做动画）。
     ///
@@ -309,7 +294,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.show(relativeTo: rect, of: btn, preferredEdge: .minY)
         lastAnchorRect = rect
         lastStatusWindowFrame = frame
-        lastSeenStatusWindowFrame = frame
+        lastSeenStatusWindowX = frame.minX
     }
 
     func popoverDidShow(_ notification: Notification) {
@@ -318,10 +303,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         isPanelOpen = false
-        // 清掉观测基准与待执行的稳定计时：下次打开时重新按当时的窗口算
-        lastSeenStatusWindowFrame = nil
-        settleWork?.cancel()
-        settleWork = nil
+        // 清掉观测基准：下次打开时重新按当时的窗口算
+        lastSeenStatusWindowX = nil
         lastAnchorRect = nil
         finishAnimation()
         // 释放面板视图：不释放的话它会一直跟着数据每秒重绘，
