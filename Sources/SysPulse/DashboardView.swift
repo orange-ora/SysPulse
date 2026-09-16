@@ -14,8 +14,6 @@ struct DashboardView: View {
     var onMenuSelection: () -> Void = {}
 
     private var snapshot: MetricsSnapshot { monitor.snapshot }
-    /// 手动弹的菜单用的 target（见 `toolbarMenu`）
-    private let menuTarget = ToolbarMenuTarget.shared
 
     var body: some View {
         VStack(spacing: 9) {
@@ -98,9 +96,6 @@ struct DashboardView: View {
                 toggleChip("GPU", isOn: preferences.showGPU) { preferences.showGPU.toggle() }
                 toggleChip("内存", isOn: preferences.showMemory) { preferences.showMemory.toggle() }
                 toggleChip("流光", isOn: preferences.menuBarGlow) { preferences.menuBarGlow.toggle() }
-                // 「动画」= 面板开合是否走系统动画。关掉后开合瞬时（约 110ms）更跟手，
-                // 而且状态栏项那圈"高亮底"不会分成两次画（见 Preferences.panelAnimates 的注释）。
-                toggleChip("动画", isOn: preferences.panelAnimates) { preferences.panelAnimates.toggle() }
             }
             .padding(.top, 5)   // 标题行 7pt + 这里 5pt = 12pt，比卡片内「标题 / 进度条」再松一点
         }
@@ -142,59 +137,7 @@ struct DashboardView: View {
             )
             .contentShape(Capsule())
         }
-        .buttonStyle(SpringyButtonStyle(pressedScale: 0.86, response: 0.24, damping: 0.42))
-    }
-
-    /// 底部工具栏的一个下拉项：普通 `Button`（这样 Q 弹动画能生效）+ 手动弹 `NSMenu`。
-    ///
-    /// `NSMenu` 是模态追踪的：选中后 action 触发、菜单自己关；面板由 `onMenuSelection`
-    /// 负责收（它已经把 `performClose` 丢到下一个 runloop，不会和菜单收尾打架）。
-    private func toolbarMenu(_ title: String, systemImage: String, items: [ToolbarMenuItem]) -> some View {
-        Button {
-            let menu = NSMenu()
-            for item in items {
-                let menuItem = NSMenuItem(title: item.title, action: #selector(ToolbarMenuTarget.fire(_:)), keyEquivalent: "")
-                menuItem.target = menuTarget
-                menuItem.representedObject = item.action
-                // 勾用富文本画（系统勾是单色模板图，改不了颜色）——
-                // 和原来 SwiftUI 版一样的做法：勾占固定宽度，未选中用空格占位保持对齐。
-                var head = AttributedString(item.isOn ? "✓  " : "     ")
-                if item.isOn { head.foregroundColor = .green }
-                menuItem.attributedTitle = NSAttributedString(head + AttributedString(item.title))
-                menu.addItem(menuItem)
-            }
-            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
-        } label: {
-            HStack(spacing: 3) {
-                Label(title, systemImage: systemImage).font(.system(size: 11))
-                // ⌄ 原来由 SwiftUI 的 `Menu` 自带，换成普通 Button 后要自己画
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .buttonStyle(SpringyButtonStyle(pressedScale: 0.90, response: 0.24, damping: 0.40))
-    }
-
-    /// 菜单项：标题 + 是否打勾 + 选中后做什么。
-    struct ToolbarMenuItem {
-        let title: String
-        let isOn: Bool
-        let action: () -> Void
-
-        init(_ title: String, isOn: Bool, action: @escaping () -> Void) {
-            self.title = title
-            self.isOn = isOn
-            self.action = action
-        }
-    }
-
-    /// `NSMenuItem` 的 target：把闭包包成 `@objc` 方法能调的形式。
-    final class ToolbarMenuTarget: NSObject {
-        static let shared = ToolbarMenuTarget()
-        @objc func fire(_ sender: NSMenuItem) {
-            (sender.representedObject as? () -> Void)?()
-        }
+        .buttonStyle(.plain)
     }
 
     /// 菜单项：选中时在文字前加一个**绿色**勾。
@@ -253,38 +196,49 @@ struct DashboardView: View {
             Divider().padding(.vertical, 1)
 
             HStack(spacing: 6) {
-                // 这三个原来是 SwiftUI 的 `Menu`。⚠️ **`Menu` 不会把"按下"状态传给
-                // `ButtonStyle`**，所以那套 Q 弹动画在它们身上根本不生效（用户 2026-09-17 反馈）。
-                // 现在改成普通 `Button`（按下动画由 `SpringyButtonStyle` 驱动）+ 在 action 里
-                // 手动 `NSMenu.popUp`，菜单内容与勾选逻辑保持不变。
-                toolbarMenu("刷新", systemImage: "clock", items: [
-                    ToolbarMenuItem(intervalTitle(0.5), isOn: abs(preferences.refreshInterval - 0.5) < 0.01) {
-                        preferences.refreshInterval = 0.5; onMenuSelection()
-                    },
-                    ToolbarMenuItem(intervalTitle(1), isOn: abs(preferences.refreshInterval - 1) < 0.01) {
-                        preferences.refreshInterval = 1; onMenuSelection()
-                    },
-                    ToolbarMenuItem(intervalTitle(2), isOn: abs(preferences.refreshInterval - 2) < 0.01) {
-                        preferences.refreshInterval = 2; onMenuSelection()
-                    },
-                    ToolbarMenuItem(intervalTitle(5), isOn: abs(preferences.refreshInterval - 5) < 0.01) {
-                        preferences.refreshInterval = 5; onMenuSelection()
+                Menu {
+                    ForEach([0.5, 1.0, 2.0, 5.0], id: \.self) { interval in
+                        Button {
+                            preferences.refreshInterval = interval
+                            onMenuSelection()
+                        } label: {
+                            menuRow(intervalTitle(interval), isOn: abs(preferences.refreshInterval - interval) < 0.01)
+                        }
                     }
-                ])
+                } label: {
+                    Label("刷新", systemImage: "clock").font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
 
-                toolbarMenu("排版", systemImage: "rectangle.split.3x1",
-                            items: MenuBarLayout.allCases.map { layout in
-                    let title = layout.detail.map { "\(layout.title) · \($0)" } ?? layout.title
-                    return ToolbarMenuItem(title, isOn: preferences.menuBarLayout == layout) {
-                        preferences.menuBarLayout = layout; onMenuSelection()
+                Menu {
+                    ForEach(MenuBarLayout.allCases, id: \.self) { layout in
+                        let title = layout.detail.map { "\(layout.title) · \($0)" } ?? layout.title
+                        Button {
+                            preferences.menuBarLayout = layout
+                            onMenuSelection()
+                        } label: {
+                            menuRow(title, isOn: preferences.menuBarLayout == layout)
+                        }
                     }
-                })
+                } label: {
+                    Label("排版", systemImage: "rectangle.split.3x1").font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
 
-                toolbarMenu("启动", systemImage: "power.circle", items: [
-                    ToolbarMenuItem("开机自动启动", isOn: login.isEnabled) {
-                        login.set(!login.isEnabled); onMenuSelection()
+                Menu {
+                    Button {
+                        login.set(!login.isEnabled)
+                        onMenuSelection()
+                    } label: {
+                        menuRow("开机自动启动", isOn: login.isEnabled)
                     }
-                ])
+                } label: {
+                    Label("启动", systemImage: "power.circle").font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
 
                 Spacer(minLength: 4)
 
@@ -293,7 +247,7 @@ struct DashboardView: View {
                 } label: {
                     Label("退出", systemImage: "xmark.circle").font(.system(size: 11))
                 }
-                .buttonStyle(SpringyButtonStyle(pressedScale: 0.92, response: 0.26, damping: 0.5))
+                .buttonStyle(.borderless)
             }
 
             if let message = login.errorMessage {
@@ -538,24 +492,5 @@ extension NSColor {
     /// 把 AppKit 颜色映射到 SwiftUI 颜色，保证状态栏与面板配色一致。
     var swiftUIColor: Color {
         Color(nsColor: self)
-    }
-}
-
-/// 「果冻」按钮样式：按下缩一点、松手用**欠阻尼弹簧**弹回（会过冲一下），
-/// 就是 iOS 那种 Q 弹手感（2026-09-16 按需求加的）。
-///
-/// 只依赖 `ButtonStyle` 提供的 `isPressed`，**不需要任何状态** —— 本机命令行工具链缺少
-/// SwiftUIMacros 插件，这个项目的源码刻意不用 `@State` 之类的宏。
-/// 手感靠三个数调：`pressedScale` 按下缩多少、`response` 快慢、`damping` 回弹几下
-/// （< 1 才有回弹；0.42 ≈ 蹦两下，0.5 ≈ 轻微过冲，0.8 ≈ 基本不弹）。
-struct SpringyButtonStyle: ButtonStyle {
-    var pressedScale: CGFloat = 0.90
-    var response: Double = 0.26
-    var damping: Double = 0.45
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? pressedScale : 1)
-            .animation(.spring(response: response, dampingFraction: damping), value: configuration.isPressed)
     }
 }

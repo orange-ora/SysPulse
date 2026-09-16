@@ -40,15 +40,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let anchorAnimationDuration: CFTimeInterval = 0.18
     /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
     private var lastRenderedImageWidth: CGFloat?
+    /// 动画进行中收到的点击先记账，等动画结束再补上，避免被系统忽略
+    private var pendingToggle = false
     private var isAnimating = false
-    /// 上一次开合的时刻。用来判断"这一次是不是快速连点"——连点时不走动画（见 `applyToggle`）。
-    private var lastToggleAt: Date?
-    /// 快速连点的判定窗口：距上次开合不到这么久，就认为用户在连点，这一次不做动画。
-    ///
-    /// 为什么必须这样（2026-09-16 实测 + 用户反馈）：系统开合动画约 **600ms**，
-    /// 而**动画期间它会忽略反向操作** —— 连点只能被 `pendingToggle` 记账合并成一次净效果，
-    /// 用户感觉"点了三次只有一次生效、被吞了"。从容点击（间隔 > 这个窗口）才享受动画。
-    private let quickToggleWindow: TimeInterval = 0.45
 
     /// 由宽到窄的档位顺序
     private let densityOrder: [MenuBarDensity] = [.full, .compact, .minimal]
@@ -97,15 +91,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 紧接着按钮事件才到达，此时 isShown 已经是 false，于是又被重新打开——
         // 表现就是怎么点都关不上。改用 .applicationDefined 自己管外部点击，状态才可控。
         popover.behavior = .applicationDefined
-        // 面板开合动画**交给系统**（2026-09-16 晚按需求改回来）：
-        // 用户要的是"整个框子动"，而 `NSPopover` 的框（含箭头）是系统绘制的 ——
-        // 自己只能动内容图层，那会变成"框先到位、内容在里面晃"，更晃眼睛（试过，被否了）。
-        //
-        // ⚠️ 实测（2026-09-16 晚）：系统的开合动画**固定约 600ms**，
-        // `NSAnimationContext` 的 duration / timingFunction **完全不起作用**
-        // （设 0.60 / 0.30 / 0.15 实测都是 588~603ms），所以既压不短、也换不成带过冲的曲线。
-        // 想要"框子 Q 弹"只能放弃 `NSPopover` 自绘面板（开合、外部点击收起、键盘焦点都要自己做）。
-        popover.animates = true
+        // 动画关掉：NSPopover 的动画由系统绘制，帧率观感不佳（发卡），
+        // 而且时长不可调。关掉后展开只要约 110ms，跟手得多。
+        popover.animates = false
         popover.delegate = self
 
         // 点到别的 App / 桌面就收起。
@@ -113,17 +101,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 所以必须排除落在图标自身区域内的点击，否则每次点击都会先被这里关掉、
         // 再被按钮 action 重新打开，表现为"快速连点被吞"。
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard let self else { return }
-            if self.isPointOnStatusItem(NSEvent.mouseLocation) {
-                // 点的是我们自己的图标：把系统的"按下高亮"按掉。
-                // 为什么：一次点击会被系统画**两次**底色 —— ①鼠标按下时的"按下高亮"、
-                // ②面板打开后的"选中高亮"，中间有段空档，用户看到的就是"点一次闪两下"。
-                // 按掉第①次，就只剩面板打开后那一次，观感是"点一下亮一下"。
-                // 丢到下一个 runloop 执行：全局监听是在系统处理这次点击**之前**跑的。
-                DispatchQueue.main.async { self.clearStatusItemHighlight() }
-                return
-            }
-            guard self.popover.isShown else { return }
+            guard let self, self.popover.isShown else { return }
+            if self.isPointOnStatusItem(NSEvent.mouseLocation) { return }
             self.closePopoverIfShown()
         }
 
@@ -202,12 +181,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
     }
 
-    /// 把状态栏项上的"按下高亮"清掉（选中高亮清不掉，见 README 开发备注）。
-    private func clearStatusItemHighlight() {
-        statusItem.button?.highlight(false)
-        statusItem.button?.cell?.isHighlighted = false
-    }
-
     /// 判断某个屏幕坐标点是否落在状态栏图标上
     private func isPointOnStatusItem(_ point: NSPoint) -> Bool {
         guard let button = statusItem.button, let window = button.window else { return false }
@@ -239,43 +212,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // MARK: - 交互
 
     @objc private func togglePopover(_ sender: Any?) {
-        // 开合动画进行中又点了：**立刻打断**动画并反向（见 interruptAnimationAndToggle）。
+        // 开合动画进行中，系统会忽略反向操作；这里先记下这次点击的净效果，
+        // 等 popoverDidShow / popoverDidClose 到达时再补上，点击就不会丢。
         guard !isAnimating else {
-            interruptAnimationAndToggle()
+            pendingToggle.toggle()
             return
         }
         applyToggle()
-    }
-
-    /// 动画进行中又收到点击：**立刻打断**正在跑的动画并反向。
-    ///
-    /// 为什么需要它（2026-09-16 实测 + 用户反馈）：系统开合动画约 **600ms**，而
-    /// **动画期间它会忽略反向操作** —— 旧写法只能把连点记成 `pendingToggle`、等动画走完再补，
-    /// 用户的感觉是"连点三次只有一次生效、被吞了"。
-    /// 实测解法：**先把 `animates` 关掉、再执行反向操作，系统会当场接受**：
-    /// 打开动画进行到 214ms 时点第二下，面板 **16ms 后**就关上了（不是等 600ms）；
-    /// 打断之后 App 一切正常，后续点击照常响应。
-    private func interruptAnimationAndToggle() {
-        popover.animates = false
-        lastToggleAt = Date()
-        if isPanelOpen {
-            isPanelOpen = false
-            isAnimating = true
-            popover.performClose(nil)
-        } else if let button = statusItem.button {
-            isPanelOpen = true
-            isAnimating = true
-            popover.show(relativeTo: anchorRect(for: button), of: button, preferredEdge: .minY)
-        } else {
-            isAnimating = false
-        }
     }
 
     private func applyToggle() {
         if isPanelOpen {
             isPanelOpen = false
             isAnimating = true
-            beginToggleAnimationDecision()
             popover.performClose(nil)
             return
         }
@@ -303,7 +252,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 系统用去「激活 App + 让弹窗成为 key window」，这一次点击不会传给控件。
         isPanelOpen = true
         isAnimating = true
-        beginToggleAnimationDecision()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: anchorRect(for: button), of: button, preferredEdge: .minY)
         lastAnchorRect = anchorRect(for: button)
@@ -314,16 +262,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.contentViewController?.view.window?.makeKey()
     }
 
-    /// 面板箭头锚定的矩形：**1pt 宽、居中在按钮中心**。
+    /// 面板箭头锚定的矩形。
     ///
-    /// 系统会把面板居中在这个矩形上、箭头对准矩形中心，所以 1pt 和整个 `button.bounds`
-    /// 定位结果一样。⚠️ 但**不能用 `button.bounds`**：实测那会在状态栏窗口**变窄**时
-    /// 让系统把面板重新摆一次 —— 存下来的定位矩形（229pt）比新窗口（184pt）宽，
-    /// 被夹到新边界后中心正好落到「旧 x + 新宽度/2」那个中间态上（实测面板先向左跳 22pt）。
-    /// 这个坑**只在刚打开面板时**出现：开面板那一句原本用的是整个 bounds，
-    /// 而之后每次重新定位用的都是 1pt 矩形（不会越界，系统重算也还是同一个中心 → 不动）。
+    /// 直接返回 `button.bounds`：这是 `NSPopover` 的标准用法，系统会把面板居中在这个矩形上、
+    /// 箭头对准矩形中心。
     private func anchorRect(for button: NSStatusBarButton) -> NSRect {
-        NSRect(x: button.bounds.midX - 0.5, y: 0, width: 1, height: button.bounds.height)
+        button.bounds
     }
 
     /// 面板开着时，如果**系统把状态栏窗口的 x 挪了**，就把面板重新锚定到新的图标中心。
@@ -369,16 +313,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         lastSeenStatusWindowX = frame.minX
         movePanel(arrowTo: frame.midX, button: btn)
     }
-
-    /// 这一次开合要不要动画：**连点就不要**（跟手优先），从容点击才走系统的 600ms 动画。
-    ///
-    /// 每次开合都重新决定，所以不需要"用完再恢复"—— 下一次开合会自己设回来。
-    private func beginToggleAnimationDecision() {
-        let isQuickRepeat = lastToggleAt.map { Date().timeIntervalSince($0) < quickToggleWindow } ?? false
-        popover.animates = preferences.panelAnimates && !isQuickRepeat
-        lastToggleAt = Date()
-    }
-
 
     /// 让面板的箭头对准屏幕横坐标 `screenX`（一次性摆好，不做动画）。
     ///
@@ -441,10 +375,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.contentViewController = nil
     }
 
-    /// 开合通知到达 = 这一次动画彻底结束（被 `interruptAnimationAndToggle` 打断时也一样，
-    /// 会先收到被中断那一次的 DID-SHOW/DID-CLOSE，再收到反向那一次的）。
     private func finishAnimation() {
         isAnimating = false
+        guard pendingToggle else { return }
+        pendingToggle = false
+        applyToggle()
     }
 
     // MARK: - 状态栏
