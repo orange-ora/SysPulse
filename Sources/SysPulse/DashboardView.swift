@@ -15,6 +15,11 @@ struct DashboardView: View {
 
     private var snapshot: MetricsSnapshot { monitor.snapshot }
 
+    /// 底部工具栏（刷新 / 排版 / 启动 / 退出）统一的字号。
+    /// 四者的图标与文字都由它派生 —— "调大一号"只改这一处，也不会再出现
+    /// 谁比谁粗、谁比谁大的不一致（2026-09-17 用户要求整体调大一号）。
+    private let toolbarFontSize: CGFloat = 12
+
     var body: some View {
         VStack(spacing: 9) {
             header
@@ -206,7 +211,7 @@ struct DashboardView: View {
                         }
                     }
                 } label: {
-                    Label("刷新", systemImage: "clock").font(.system(size: 11))
+                    Label("刷新", systemImage: "clock").font(.system(size: toolbarFontSize))
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -222,7 +227,7 @@ struct DashboardView: View {
                         }
                     }
                 } label: {
-                    Label("排版", systemImage: "rectangle.split.3x1").font(.system(size: 11))
+                    Label("排版", systemImage: "rectangle.split.3x1").font(.system(size: toolbarFontSize))
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -235,7 +240,7 @@ struct DashboardView: View {
                         menuRow("开机自动启动", isOn: login.isEnabled)
                     }
                 } label: {
-                    Label("启动", systemImage: "power.circle").font(.system(size: 11))
+                    Label("启动", systemImage: "power.circle").font(.system(size: toolbarFontSize))
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -253,9 +258,9 @@ struct DashboardView: View {
                     // 即使文字对齐了，图标还是会显得比它们重（用户："太丑了"）。
                     HStack(spacing: 4) {
                         Image(systemName: "xmark.circle")
-                            .font(.system(size: 11, weight: .regular))
+                            .font(.system(size: toolbarFontSize, weight: .regular))
                         Text("退出")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: toolbarFontSize, weight: .medium))
                     }
                     .foregroundStyle(.primary)
                 }
