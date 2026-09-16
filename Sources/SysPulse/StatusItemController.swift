@@ -262,12 +262,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.contentViewController?.view.window?.makeKey()
     }
 
-    /// 面板箭头锚定的矩形。
+    /// 面板箭头锚定的矩形：**1pt 宽、居中在按钮中心**。
     ///
-    /// 直接返回 `button.bounds`：这是 `NSPopover` 的标准用法，系统会把面板居中在这个矩形上、
-    /// 箭头对准矩形中心。
+    /// 系统会把面板居中在这个矩形上、箭头对准矩形中心，所以 1pt 和整个 `button.bounds`
+    /// 定位结果一样。⚠️ 但**不能用 `button.bounds`**：实测那会在状态栏窗口**变窄**时
+    /// 让系统把面板重新摆一次 —— 存下来的定位矩形（229pt）比新窗口（184pt）宽，
+    /// 被夹到新边界后中心正好落到「旧 x + 新宽度/2」那个中间态上（实测面板先向左跳 22pt）。
+    /// 这个坑**只在刚打开面板时**出现：开面板那一句原本用的是整个 bounds，
+    /// 而之后每次重新定位用的都是 1pt 矩形（不会越界，系统重算也还是同一个中心 → 不动）。
     private func anchorRect(for button: NSStatusBarButton) -> NSRect {
-        button.bounds
+        NSRect(x: button.bounds.midX - 0.5, y: 0, width: 1, height: button.bounds.height)
     }
 
     /// 面板开着时，如果**系统把状态栏窗口的 x 挪了**，就把面板重新锚定到新的图标中心。
