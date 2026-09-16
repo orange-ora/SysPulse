@@ -621,9 +621,17 @@ cd ~/Documents/DeepSeek/SysPulse
 > 关掉动画后只要 112ms），公开 API 只能选「有动画 / 无动画」，不能调速。
 > 想做到"快而不生硬"（比如 120ms）只能不用 `NSPopover`，自己画面板 + 自己做动画。
 >
-> **当前选择：关掉动画**（`popover.animates = false`）。系统动画由 WindowServer 绘制，
-> 帧率观感发卡，而且时长不可调；关掉后展开约 110ms，明显跟手。
-> 想换回动画只需把这一行改成 `true`，连点已经通过 `pendingToggle` 记账处理，不会丢点击。
+> **当前选择：开动画**（`popover.animates = true`，2026-09-16 晚按需求改回来）。
+> 原因：用户要"**整个框子动**"，而 `NSPopover` 的框（含箭头）是系统绘制的 ——
+> 自己只能动**内容图层**，那会变成"框先到位、内容在里面晃"，更晃眼睛（试过，被否）。
+> 代价与实测（都在 2026-09-16 晚量过）：
+> - 系统开合动画**固定约 600ms**（`SHOW-START` → `popoverDidShow` 实测 588~603ms），
+>   开、关都这么慢；以前关掉动画展开只要约 110ms。
+> - ⚠️ **`NSAnimationContext` 对它完全无效**：把 `duration` 设成 0.60 / 0.30 / 0.15，
+>   实测都是 588~603ms；换 `timingFunction` 想加过冲也没用。**既压不短、也换不成 Q 弹曲线。**
+> - 想要"框子真 Q 弹"只能放弃 `NSPopover` 自绘面板（开合、外部点击收起、键盘焦点都要自己做），
+>   本项目暂不这么做。
+> - 连点已经通过 `pendingToggle` 记账处理，动画期间不会丢点击。
 - 本机命令行工具链缺少 `SwiftUIMacros` 插件，因此源码中不使用 `@State` 等 SwiftUI 宏，
   改用 `ObservableObject` + `@Published`。（完整的 Xcode 环境不受此限制。）
 - `swift build`（SwiftPM）在沙盒环境下会因 `sandbox-exec` 受限而失败，`build.sh` 因此直接
@@ -704,15 +712,12 @@ cd ~/Documents/DeepSeek/SysPulse
   实测空闲开销仍是 **0.12% CPU**（与加水波前的 0.11~0.13% 同一量级），渲染 0.01ms/次。
   竖向的色相仍然不变（只动明暗），所以不会出现"那点高度从紫到蓝糊掉"的问题。
 - **面板 / 按钮的「果冻」动画**（2026-09-16 晚按需求加的）：
-  1. **面板弹出**：`StatusItemController.playPanelAppearSpring()` —— 给内容视图的图层加一个
-     `CASpringAnimation(keyPath: "transform.scale")`：`fromValue 0.88`、`stiffness 340`、
-     `damping 17`、`initialVelocity 2.5`（**欠阻尼** → 会过冲再回落，就是 Q 弹的来源）。
-     ⚠️ **只动内容、不动窗口**：`NSPopover` 的窗口位置和箭头由系统绑定，自己动窗口会出问题
-     （见上面第 6 条）。所以观感是"面板底色先到位、里面的内容 Q 弹地弹出来"，
-     再叠上系统自己那点淡入 —— 实测连拍能看到中间帧（内容缩到约 0.9）。
-     为什么用 CoreAnimation 而不是 SwiftUI 动画：本机命令行工具链缺 SwiftUIMacros 插件，
-     源码刻意不用 `@State` 之类的宏，没有状态就写不了"出现后弹一下"；
-     `CASpringAnimation` 的 `damping` 也正好就是"回弹几下"，比 `withAnimation` 好调。
+  1. **面板弹出 / 收起：整个框子动**（`popover.animates = true`，用系统动画）。
+     ⚠️ **曾经试过一版"只动内容"的**（给内容图层加 `CASpringAnimation(transform.scale)`，
+     `fromValue 0.88` / `damping 17` 欠阻尼、会过冲）—— **被用户否掉**：
+     框子先到位、内容再在里面缩放，看着"晃眼睛"。要框子动就只能用系统动画，
+     而系统动画固定约 600ms 且不可调（见上面「代价与取舍」那段）。
+     中间帧实测：面板（框 + 箭头 + 内容）作为**一个整体**淡入/放大，内容相对框子不变形。
   2. **按钮**：`SpringyButtonStyle`（`DashboardView.swift` 末尾）—— 按下缩一点、松手用
      **欠阻尼弹簧**弹回。只依赖 `ButtonStyle` 给的 `isPressed`，**同样不需要状态**。
      已应用：显示项那五个小开关（`0.86 / 0.26 / 0.42`，回弹最明显）、底部「退出」

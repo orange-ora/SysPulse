@@ -91,9 +91,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 紧接着按钮事件才到达，此时 isShown 已经是 false，于是又被重新打开——
         // 表现就是怎么点都关不上。改用 .applicationDefined 自己管外部点击，状态才可控。
         popover.behavior = .applicationDefined
-        // 动画关掉：NSPopover 的动画由系统绘制，帧率观感不佳（发卡），
-        // 而且时长不可调。关掉后展开只要约 110ms，跟手得多。
-        popover.animates = false
+        // 面板开合动画**交给系统**（2026-09-16 晚按需求改回来）：
+        // 用户要的是"整个框子动"，而 `NSPopover` 的框（含箭头）是系统绘制的 ——
+        // 自己只能动内容图层，那会变成"框先到位、内容在里面晃"，更晃眼睛（试过，被否了）。
+        //
+        // ⚠️ 实测（2026-09-16 晚）：系统的开合动画**固定约 600ms**，
+        // `NSAnimationContext` 的 duration / timingFunction **完全不起作用**
+        // （设 0.60 / 0.30 / 0.15 实测都是 588~603ms），所以既压不短、也换不成带过冲的曲线。
+        // 想要"框子 Q 弹"只能放弃 `NSPopover` 自绘面板（开合、外部点击收起、键盘焦点都要自己做）。
+        popover.animates = true
         popover.delegate = self
 
         // 点到别的 App / 桌面就收起。
@@ -260,32 +266,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         lastStatusWindowFrame = button.window?.frame
         lastSeenStatusWindowX = button.window?.frame.minX
         popover.contentViewController?.view.window?.makeKey()
-        playPanelAppearSpring()
-    }
-
-    /// 面板**弹出来**的那一下：给内容视图的图层加一个**欠阻尼弹簧**（会过冲再回落），
-    /// 就是 iOS 那种 Q 弹感（2026-09-16 按需求加的）。
-    ///
-    /// 为什么用 CoreAnimation 而不是 SwiftUI 动画：
-    /// - 本机命令行工具链缺 SwiftUIMacros 插件，源码里刻意不用 `@State` 之类的宏，
-    ///   没有状态就没法在 SwiftUI 里写"出现后弹一下"；
-    /// - `CASpringAnimation` 的 `damping` 直接就是"回弹几下"，比 `withAnimation` 好调，
-    ///   而且作用在整个内容视图上（面板里所有卡片一起弹）。
-    ///
-    /// ⚠️ 只动**内容**、不动窗口：`NSPopover` 的窗口位置和箭头由系统绑定，
-    /// 自己动窗口会出问题（见 README 开发备注第 6 条）。所以看到的效果是
-    /// "面板底色先到位、里面的内容 Q 弹地弹出来"。
-    private func playPanelAppearSpring() {
-        guard let layer = popover.contentViewController?.view.layer else { return }
-        let spring = CASpringAnimation(keyPath: "transform.scale")
-        spring.fromValue = 0.88
-        spring.toValue = 1.0
-        spring.mass = 1
-        spring.stiffness = 340     // 越大越快
-        spring.damping = 17        // 越小回弹越明显（欠阻尼）
-        spring.initialVelocity = 2.5
-        spring.duration = spring.settlingDuration
-        layer.add(spring, forKey: "panelAppearSpring")
     }
 
     /// 面板箭头锚定的矩形：**1pt 宽、居中在按钮中心**。
