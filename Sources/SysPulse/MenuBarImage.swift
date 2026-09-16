@@ -161,7 +161,8 @@ enum MenuBarImage {
     ///   而不是一道光从左扫到右。纯计算 + 一次 `NSGradient.draw`，很便宜。
     /// - 曾经在光带之上"手搓"过玻璃质感（顶部高光 + 亮边 + 底缘暗边），后来按需求去掉了；
     ///   想恢复的话见 `Backups/MenuBarImage.swift.流光-v3.5-亮且浓-2026-09-16`。
-    /// - 只横向渐变（`angle: 0`）：竖向恒定，否则那点高度会从紫到蓝糊掉。
+    /// - 彩色部分**只横向渐变**（`angle: 0`）：竖向恒定，否则那点高度会从紫到蓝糊掉。
+    ///   竖向的变化交给上面那层"水波"（`drawRipple`）用明暗做，而不是让色相在竖向也变。
     static func drawGlow(size: NSSize, phase: Double?) {
         guard let phase else { return }
         // 三组色相：蓝 → 紫 → 青，互相错开，流动时颜色一直在变
@@ -195,6 +196,48 @@ enum MenuBarImage {
         let path = NSBezierPath(roundedRect: rect, xRadius: size.height / 2, yRadius: size.height / 2)
         NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
             .draw(in: path, angle: 0)
+
+        // 彩色光带之上再叠一层"水波"（明暗起伏），见 drawRipple 的注释
+        drawRipple(size: size, phase: phase)
+    }
+
+    /// 水波起伏层：在彩色光带**之上**叠一层明暗波纹，波面略微倾斜、相位随时间上下推移 ——
+    /// 于是在"颜色横向流动"之外，多出**上下起伏**的观感（2026-09-16 按需求加的）。
+    ///
+    /// 实现上只多花**一次** `NSGradient.draw`（不是把画面切成很多横条去逐条画）：
+    /// 一条竖向、略斜的渐变，白 / 黑交替若干道 —— 白色提亮、黑色压暗，叠在光带上就是起伏；
+    /// `phase` 随时间推移 = 波纹在上下走。开销与原来同一量级（实测见 README 开销表）。
+    ///
+    /// 可调参数（都在函数里，改完 `./build.sh` 即可）：
+    /// - `bands`  竖直方向上有几道波纹（越大越密；1.1 ≈ 上下一道明 + 一道暗）
+    /// - `travel` 一相位周期（12 秒）内波纹上下走几道 —— 越大越快
+    /// - `strength` 起伏强度（明暗幅度）：0.10 很含蓄、0.18 明显、0.30 会有点晃眼
+    /// - `waveAngle` 渐变轴的角度：**必须接近 90°（竖直）**，条纹才是横着的、随时间上下走；
+    ///   90° 完全水平如百叶窗，偏一点更像水波。⚠️ 一开始写成 14°（接近横向），
+    ///   结果等于又叠了一层横向条纹、竖向几乎没有起伏（离屏量测的竖向落差只有 0.02~0.04）。
+    static func drawRipple(size: NSSize, phase: Double?) {
+        guard let phase else { return }
+        let bands: CGFloat = 1.1
+        let travel: CGFloat = 2.0
+        let strength: CGFloat = 0.18
+        let waveAngle: CGFloat = 78
+        let samples = 12
+
+        var colors: [NSColor] = []
+        var locations: [CGFloat] = []
+        for i in 0...samples {
+            let u = CGFloat(i) / CGFloat(samples)
+            let s = sin(2 * .pi * (u * bands + CGFloat(phase) * travel))
+            // 正半周提亮、负半周压暗：一个正弦就是一明一暗一道波纹
+            colors.append(s >= 0 ? NSColor(white: 1, alpha: s * strength)
+                                 : NSColor(white: 0, alpha: -s * strength))
+            locations.append(u)
+        }
+
+        let rect = NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: size.height / 2, yRadius: size.height / 2)
+        NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
+            .draw(in: path, angle: waveAngle)
     }
 
     // MARK: - 各行内容
