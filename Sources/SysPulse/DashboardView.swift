@@ -18,7 +18,7 @@ struct DashboardView: View {
     /// 底部工具栏（刷新 / 排版 / 启动 / 退出）统一的字号。
     /// 四者的图标与文字都由它派生 —— "调大一号"只改这一处，也不会再出现
     /// 谁比谁粗、谁比谁大的不一致（2026-09-17 用户要求整体调大一号）。
-    private let toolbarFontSize: CGFloat = 12
+    private let toolbarFontSize: CGFloat = 13
 
     var body: some View {
         VStack(spacing: 9) {
