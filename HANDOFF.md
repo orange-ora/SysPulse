@@ -41,7 +41,10 @@
    而我们的流光条比状态项窗口窄（系统固定留 8pt），于是那圈底从边上露出来像"白边闪两下"。
    `highlight(false)` / `cell.isHighlighted` 都**无效**（已实测并删掉无效代码），
    详见 README 开发备注最后一条。
-8. **（新增开关）显示项卡片多了「动画」**（`preferences.panelAnimates`，默认开）：
+8. **底部工具栏改成 Button + 手动 NSMenu**（2026-09-17 用户反馈「这三个按钮没有 Q 弹动画」）：
+   SwiftUI 的 `Menu` 不把按下状态传给 `ButtonStyle`，所以动画不生效；换成普通 Button + action 里
+   `NSMenu.popUp`，并自己补了 ⌄（`Menu` 自带、Button 没有）。菜单项、绿色勾、选完收面板都保持原样。
+9. **（新增开关）显示项卡片多了「动画」**（`preferences.panelAnimates`，默认开）：
    控制面板开合是否走系统动画。关掉则开合瞬时（约 110ms），两次高亮紧挨着、白边只闪一下；
    开着则整个框子淡入/放大（约 600ms）。两者不可兼得，交给用户按手感选。
 

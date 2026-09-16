@@ -731,9 +731,17 @@ cd ~/Documents/DeepSeek/SysPulse
      中间帧实测：面板（框 + 箭头 + 内容）作为**一个整体**淡入/放大，内容相对框子不变形。
   2. **按钮**：`SpringyButtonStyle`（`DashboardView.swift` 末尾）—— 按下缩一点、松手用
      **欠阻尼弹簧**弹回。只依赖 `ButtonStyle` 给的 `isPressed`，**同样不需要状态**。
-     已应用：显示项那五个小开关（`0.86 / 0.26 / 0.42`，回弹最明显）、底部「退出」
-     （`0.92 / 0.26 / 0.5`）、底部三个菜单（`0.94 / 0.26 / 0.5`）。
-     ✅ 给 `Menu` 加 `buttonStyle` **不会破坏 `.borderlessButton` 的外观**（标签和 ⌄ 都在，已截图核对）。
+     已应用：显示项的六个小开关（`0.86 / 0.24 / 0.42`，回弹最明显）、底部「退出」
+     （`0.92 / 0.26 / 0.5`）。
+     ⚠️ **底部「刷新 / 排版 / 启动」不能用 SwiftUI 的 `Menu`**（2026-09-17 用户反馈后改的）：
+     `Menu` **不会把按下状态传给 `ButtonStyle`**，所以那套 Q 弹动画在它们身上**根本不生效**
+     （给 `Menu` 加 `buttonStyle` 只改外观、不驱动 `isPressed`）。
+     现在改成**普通 `Button` + action 里手动 `NSMenu.popUp`**（见 `toolbarMenu(_:systemImage:items:)`）：
+     - 按下动画由 `SpringyButtonStyle(0.90 / 0.24 / 0.40)` 驱动 ✓；
+     - 菜单项内容不变，勾仍用富文本画（`NSAttributedString` 前缀绿色 ✓ / 5 个空格占位）；
+     - **⌄ 要自己画**：那是 `Menu` 自带的，换成 Button 后没了（`Image(systemName: "chevron.down")`）；
+     - `NSMenu` 是模态追踪的，选中后 action 触发、菜单自己关；面板收起来仍由
+       `onMenuSelection` → `closePopoverIfShown()`（它已经把 `performClose` 丢到下一个 runloop）。
      调手感：`pressedScale` 按下缩多少、`response` 快慢、`damping` 回弹几下
      （< 1 才有回弹；0.42 ≈ 蹦两下、0.5 ≈ 轻微过冲、0.8 ≈ 基本不弹）。
   开销：两者都是**事件驱动**的（弹出那一下 / 按下那一下），没有常驻定时器；
