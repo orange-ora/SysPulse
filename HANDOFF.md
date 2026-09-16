@@ -3,14 +3,14 @@
 > **新会话接手请读这份，再加上 `README.md`。** 这份只讲"当前状态 + 今天做了什么 + 还差什么"，
 > 项目本身的完整说明（数据来源、刘海、构建、所有历史踩坑）都在 `README.md`。
 >
-> 这一轮针对"面板换档跳动"的**完整排查过程、实验数据、失败方案、未验证假设**，
-> 都在 `DEVLOG-面板跳动-2026-09-16.md` —— 要接着修这个 bug 请先读它。
+> 针对"面板换档跳动 / 位移动画"的完整排查、实验数据与失败方案在 `DEVLOG-面板跳动-2026-09-16.md`；
+> 针对"自动适应换档太慢"的在 `DEVLOG-换档适应延迟-2026-09-16.md`。
 >
 > 同目录下旧的 `HANDOFF-箭头定位.md` 是 9-15 凌晨的快照，**内容已过时**，只作历史保留。
 
 ## 0. 一句话现状
 
-**当前没有已知的功能性 bug。** 本轮（2026-09-16 晚）修好两件事：
+**当前没有已知的功能性 bug。** 本轮（2026-09-16 晚）做完这几件事：
 
 1. **「面板换档跳动」**（图标减少时箭头先反向跳一下）—— 机制已逐毫秒钉死，修法 = 换档瞬间
    按"右边缘守恒"预测最终位置并重新锚定。错误位置暴露 **218.5ms / 被画出来 8 次 → 12.1ms / 0 次**。
@@ -25,11 +25,28 @@
    单调收敛、终点精确落位。代价：换档到位从 0.07 秒变成约 0.2 秒（**跟手感略降**，
    这正是上一版回滚动画的原因；时长在 `anchorAnimationDuration`，想更跟手就调小）。
 
+4. **「刚打开面板后第一次关图标必跳一下」**（2026-09-16 晚）—— 动画暴露出来的：开面板那句用的
+   锚点矩形是整个 `button.bounds`（229pt），窗口变窄时被系统夹到新边界、中心落到中间态上；
+   之后每次重新定位用的都是 1pt 矩形所以不跳。修法 = 开面板也用 1pt 居中矩形。
+   以前"看不见"是因为当时是同一轮内瞬间拨回去、那一帧不会被提交。见 DEVLOG 第 8.1 节。
+
+以上全部真机验证过，**当前没有已知的功能性 bug**。
+
 两份完整记录：
-- `DEVLOG-面板跳动-2026-09-16.md`（面板跳动，第 7 节是结论 + 探针配方）
+- `DEVLOG-面板跳动-2026-09-16.md`（跳动 / 动画 / 锚点矩形，第 7·8 节是结论 + 探针配方）
 - `DEVLOG-换档适应延迟-2026-09-16.md`（换档太慢，含探针配方与对照数据）
 
 其余功能（面板排版、菜单选完收面板、流光、箭头跟随）都正常。
+
+### 本轮提交（`git log --oneline`）
+| 提交 | 内容 |
+| --- | --- |
+| `9ac62e5` | 换档跳动：按预测的最终位置重新锚定 |
+| `dcd2ce4` | 自动适应提速：降档 5 拍→2 拍 + 三档宽度预先量准 |
+| `7ee9676` `b021218` | 文档留底：两条"有意不做"的决定 + 升档实测与刷新周期耦合 |
+| `9d2d193` | 面板位移改成 180ms 缓出动画（`PanelAnchorAnimation.swift`） |
+| `0d66307` | 面板「显示项」卡片：GPU 与内存调换位置 |
+| `c849b73` | 修掉"刚打开面板后第一次关图标必跳"（锚点改 1pt 居中） |
 
 ## 1. 项目位置与常用命令
 
@@ -37,7 +54,7 @@
 | --- | --- |
 | 项目根目录 | `/Users/orange/Documents/DeepSeek/SysPulse` |
 | 安装的 App（机器上唯一副本） | `/Applications/SysPulse.app` |
-| 源码 | `Sources/SysPulse/*.swift`（12 个文件，约 2070 行） |
+| 源码 | `Sources/SysPulse/*.swift`（13 个文件，约 2150 行） |
 | 构建 | `cd /Users/orange/Documents/DeepSeek/SysPulse && ./build.sh` |
 | 偏好 | `~/Library/Preferences/com.local.syspulse.plist` |
 | 历史版本存档 | `Backups/`（16 个文件副本，按需 `cp` 回来） |
@@ -49,12 +66,14 @@
 
 ## 2. 当前状态（可直接核对）
 
-- 运行中，偏好：四项指标全开 · 自动排版（`auto`）· 刷新 1 秒 · 流光开启
+- 运行中，偏好：四项指标全开 · 自动排版（`auto`）· **刷新 2 秒** · 流光开启
 - 编译 **0 错误 0 告警**；源码里**没有任何调试代码**
-  （`grep -rn "PanelTrace\|SYSPULSE_\|AUTO_\|TRACE\|/tmp/" Sources/` 为空）
-- 空闲开销 **0.13% CPU / 50.6 MB**（流光本身约 +0.11%；面板开过一次后内存 +38MB 由 AppKit 持有）
-- 这一轮的改动只集中在 `StatusItemController.swift`
-  （新增 `reanchorForPredictedResize()`、`lastRenderedImageWidth`；`updateStatusItem` 里多一次调用）
+  （`grep -rn "PanelMoveTrace\|DensityTrace\|SYSPULSE_\|AUTO_\|TRACE\|/tmp/" Sources/` 为空）
+- 空闲开销 **0.11~0.13% CPU / 87 MB**、面板打开 **0.18%**（2026-09-16 晚复测，与历史一致；
+  87MB 是"面板开过一次后 AppKit 持有约 38MB"的稳态，冷启动是 47MB）。
+  **动画没有空闲开销**：`CADisplayLink` 每次动画现建、结束即 `invalidate()`。
+- 本轮的代码改动集中在三处：`StatusItemController.swift`（换档预测 + 动画接入 + 降档窗口/宽度预量）、
+  新增 `PanelAnchorAnimation.swift`、`DashboardView.swift`（显示项卡片 GPU/内存换位）
 - ⚠️ **实验期间改过的偏好要还原**：探针的 `SYSPULSE_LAYOUT` 会真的写进
   `~/Library/Preferences/com.local.syspulse.plist`。跑完记得
   `pkill -f SysPulse.app/Contents/MacOS/SysPulse` → `defaults write com.local.syspulse
