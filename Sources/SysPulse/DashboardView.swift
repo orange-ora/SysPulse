@@ -262,7 +262,8 @@ struct DashboardView: View {
                         Text("退出")
                             .font(.system(size: toolbarFontSize, weight: .medium))
                     }
-                    .foregroundStyle(.primary)
+                    // 退出是"破坏性"操作，用橙色和左边三个设置项区分开（2026-09-17 按需求改）
+                    .foregroundStyle(Color.orange)
                 }
                 .buttonStyle(.borderless)
             }
