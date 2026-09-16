@@ -40,9 +40,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let anchorAnimationDuration: CFTimeInterval = 0.18
     /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
     private var lastRenderedImageWidth: CGFloat?
-    /// 动画进行中收到的点击先记账，等动画结束再补上，避免被系统忽略
-    private var pendingToggle = false
     private var isAnimating = false
+    /// 上一次开合的时刻。用来判断"这一次是不是快速连点"——连点时不走动画（见 `applyToggle`）。
+    private var lastToggleAt: Date?
+    /// 快速连点的判定窗口：距上次开合不到这么久，就认为用户在连点，这一次不做动画。
+    ///
+    /// 为什么必须这样（2026-09-16 实测 + 用户反馈）：系统开合动画约 **600ms**，
+    /// 而**动画期间它会忽略反向操作** —— 连点只能被 `pendingToggle` 记账合并成一次净效果，
+    /// 用户感觉"点了三次只有一次生效、被吞了"。从容点击（间隔 > 这个窗口）才享受动画。
+    private let quickToggleWindow: TimeInterval = 0.45
 
     /// 由宽到窄的档位顺序
     private let densityOrder: [MenuBarDensity] = [.full, .compact, .minimal]
@@ -218,19 +224,43 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // MARK: - 交互
 
     @objc private func togglePopover(_ sender: Any?) {
-        // 开合动画进行中，系统会忽略反向操作；这里先记下这次点击的净效果，
-        // 等 popoverDidShow / popoverDidClose 到达时再补上，点击就不会丢。
+        // 开合动画进行中又点了：**立刻打断**动画并反向（见 interruptAnimationAndToggle）。
         guard !isAnimating else {
-            pendingToggle.toggle()
+            interruptAnimationAndToggle()
             return
         }
         applyToggle()
+    }
+
+    /// 动画进行中又收到点击：**立刻打断**正在跑的动画并反向。
+    ///
+    /// 为什么需要它（2026-09-16 实测 + 用户反馈）：系统开合动画约 **600ms**，而
+    /// **动画期间它会忽略反向操作** —— 旧写法只能把连点记成 `pendingToggle`、等动画走完再补，
+    /// 用户的感觉是"连点三次只有一次生效、被吞了"。
+    /// 实测解法：**先把 `animates` 关掉、再执行反向操作，系统会当场接受**：
+    /// 打开动画进行到 214ms 时点第二下，面板 **16ms 后**就关上了（不是等 600ms）；
+    /// 打断之后 App 一切正常，后续点击照常响应。
+    private func interruptAnimationAndToggle() {
+        popover.animates = false
+        lastToggleAt = Date()
+        if isPanelOpen {
+            isPanelOpen = false
+            isAnimating = true
+            popover.performClose(nil)
+        } else if let button = statusItem.button {
+            isPanelOpen = true
+            isAnimating = true
+            popover.show(relativeTo: anchorRect(for: button), of: button, preferredEdge: .minY)
+        } else {
+            isAnimating = false
+        }
     }
 
     private func applyToggle() {
         if isPanelOpen {
             isPanelOpen = false
             isAnimating = true
+            beginToggleAnimationDecision()
             popover.performClose(nil)
             return
         }
@@ -258,6 +288,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 系统用去「激活 App + 让弹窗成为 key window」，这一次点击不会传给控件。
         isPanelOpen = true
         isAnimating = true
+        beginToggleAnimationDecision()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: anchorRect(for: button), of: button, preferredEdge: .minY)
         lastAnchorRect = anchorRect(for: button)
@@ -324,6 +355,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         movePanel(arrowTo: frame.midX, button: btn)
     }
 
+    /// 这一次开合要不要动画：**连点就不要**（跟手优先），从容点击才走系统的 600ms 动画。
+    ///
+    /// 每次开合都重新决定，所以不需要"用完再恢复"—— 下一次开合会自己设回来。
+    private func beginToggleAnimationDecision() {
+        let isQuickRepeat = lastToggleAt.map { Date().timeIntervalSince($0) < quickToggleWindow } ?? false
+        popover.animates = !isQuickRepeat
+        lastToggleAt = Date()
+    }
+
+
     /// 让面板的箭头对准屏幕横坐标 `screenX`（一次性摆好，不做动画）。
     ///
     /// 锚点用一个 1pt 的矩形表达：系统把面板**居中在锚点矩形上**，所以矩形中心就是箭头位置。
@@ -385,11 +426,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.contentViewController = nil
     }
 
+    /// 开合通知到达 = 这一次动画彻底结束（被 `interruptAnimationAndToggle` 打断时也一样，
+    /// 会先收到被中断那一次的 DID-SHOW/DID-CLOSE，再收到反向那一次的）。
     private func finishAnimation() {
         isAnimating = false
-        guard pendingToggle else { return }
-        pendingToggle = false
-        applyToggle()
     }
 
     // MARK: - 状态栏
