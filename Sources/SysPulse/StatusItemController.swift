@@ -260,6 +260,32 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         lastStatusWindowFrame = button.window?.frame
         lastSeenStatusWindowX = button.window?.frame.minX
         popover.contentViewController?.view.window?.makeKey()
+        playPanelAppearSpring()
+    }
+
+    /// 面板**弹出来**的那一下：给内容视图的图层加一个**欠阻尼弹簧**（会过冲再回落），
+    /// 就是 iOS 那种 Q 弹感（2026-09-16 按需求加的）。
+    ///
+    /// 为什么用 CoreAnimation 而不是 SwiftUI 动画：
+    /// - 本机命令行工具链缺 SwiftUIMacros 插件，源码里刻意不用 `@State` 之类的宏，
+    ///   没有状态就没法在 SwiftUI 里写"出现后弹一下"；
+    /// - `CASpringAnimation` 的 `damping` 直接就是"回弹几下"，比 `withAnimation` 好调，
+    ///   而且作用在整个内容视图上（面板里所有卡片一起弹）。
+    ///
+    /// ⚠️ 只动**内容**、不动窗口：`NSPopover` 的窗口位置和箭头由系统绑定，
+    /// 自己动窗口会出问题（见 README 开发备注第 6 条）。所以看到的效果是
+    /// "面板底色先到位、里面的内容 Q 弹地弹出来"。
+    private func playPanelAppearSpring() {
+        guard let layer = popover.contentViewController?.view.layer else { return }
+        let spring = CASpringAnimation(keyPath: "transform.scale")
+        spring.fromValue = 0.88
+        spring.toValue = 1.0
+        spring.mass = 1
+        spring.stiffness = 340     // 越大越快
+        spring.damping = 17        // 越小回弹越明显（欠阻尼）
+        spring.initialVelocity = 2.5
+        spring.duration = spring.settlingDuration
+        layer.add(spring, forKey: "panelAppearSpring")
     }
 
     /// 面板箭头锚定的矩形：**1pt 宽、居中在按钮中心**。

@@ -137,7 +137,7 @@ struct DashboardView: View {
             )
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SpringyButtonStyle(pressedScale: 0.86, response: 0.24, damping: 0.42))
     }
 
     /// 菜单项：选中时在文字前加一个**绿色**勾。
@@ -210,6 +210,7 @@ struct DashboardView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .buttonStyle(SpringyButtonStyle(pressedScale: 0.94, response: 0.26, damping: 0.5))
 
                 Menu {
                     ForEach(MenuBarLayout.allCases, id: \.self) { layout in
@@ -226,6 +227,7 @@ struct DashboardView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .buttonStyle(SpringyButtonStyle(pressedScale: 0.94, response: 0.26, damping: 0.5))
 
                 Menu {
                     Button {
@@ -239,6 +241,7 @@ struct DashboardView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .buttonStyle(SpringyButtonStyle(pressedScale: 0.94, response: 0.26, damping: 0.5))
 
                 Spacer(minLength: 4)
 
@@ -247,7 +250,7 @@ struct DashboardView: View {
                 } label: {
                     Label("退出", systemImage: "xmark.circle").font(.system(size: 11))
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(SpringyButtonStyle(pressedScale: 0.92, response: 0.26, damping: 0.5))
             }
 
             if let message = login.errorMessage {
@@ -492,5 +495,24 @@ extension NSColor {
     /// 把 AppKit 颜色映射到 SwiftUI 颜色，保证状态栏与面板配色一致。
     var swiftUIColor: Color {
         Color(nsColor: self)
+    }
+}
+
+/// 「果冻」按钮样式：按下缩一点、松手用**欠阻尼弹簧**弹回（会过冲一下），
+/// 就是 iOS 那种 Q 弹手感（2026-09-16 按需求加的）。
+///
+/// 只依赖 `ButtonStyle` 提供的 `isPressed`，**不需要任何状态** —— 本机命令行工具链缺少
+/// SwiftUIMacros 插件，这个项目的源码刻意不用 `@State` 之类的宏。
+/// 手感靠三个数调：`pressedScale` 按下缩多少、`response` 快慢、`damping` 回弹几下
+/// （< 1 才有回弹；0.42 ≈ 蹦两下，0.5 ≈ 轻微过冲，0.8 ≈ 基本不弹）。
+struct SpringyButtonStyle: ButtonStyle {
+    var pressedScale: CGFloat = 0.90
+    var response: Double = 0.26
+    var damping: Double = 0.45
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? pressedScale : 1)
+            .animation(.spring(response: response, dampingFraction: damping), value: configuration.isPressed)
     }
 }

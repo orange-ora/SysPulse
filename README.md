@@ -703,6 +703,25 @@ cd ~/Documents/DeepSeek/SysPulse
   实现上**只多花一次 `NSGradient.draw`**（不是把画面切成很多横条逐条画），
   实测空闲开销仍是 **0.12% CPU**（与加水波前的 0.11~0.13% 同一量级），渲染 0.01ms/次。
   竖向的色相仍然不变（只动明暗），所以不会出现"那点高度从紫到蓝糊掉"的问题。
+- **面板 / 按钮的「果冻」动画**（2026-09-16 晚按需求加的）：
+  1. **面板弹出**：`StatusItemController.playPanelAppearSpring()` —— 给内容视图的图层加一个
+     `CASpringAnimation(keyPath: "transform.scale")`：`fromValue 0.88`、`stiffness 340`、
+     `damping 17`、`initialVelocity 2.5`（**欠阻尼** → 会过冲再回落，就是 Q 弹的来源）。
+     ⚠️ **只动内容、不动窗口**：`NSPopover` 的窗口位置和箭头由系统绑定，自己动窗口会出问题
+     （见上面第 6 条）。所以观感是"面板底色先到位、里面的内容 Q 弹地弹出来"，
+     再叠上系统自己那点淡入 —— 实测连拍能看到中间帧（内容缩到约 0.9）。
+     为什么用 CoreAnimation 而不是 SwiftUI 动画：本机命令行工具链缺 SwiftUIMacros 插件，
+     源码刻意不用 `@State` 之类的宏，没有状态就写不了"出现后弹一下"；
+     `CASpringAnimation` 的 `damping` 也正好就是"回弹几下"，比 `withAnimation` 好调。
+  2. **按钮**：`SpringyButtonStyle`（`DashboardView.swift` 末尾）—— 按下缩一点、松手用
+     **欠阻尼弹簧**弹回。只依赖 `ButtonStyle` 给的 `isPressed`，**同样不需要状态**。
+     已应用：显示项那五个小开关（`0.86 / 0.26 / 0.42`，回弹最明显）、底部「退出」
+     （`0.92 / 0.26 / 0.5`）、底部三个菜单（`0.94 / 0.26 / 0.5`）。
+     ✅ 给 `Menu` 加 `buttonStyle` **不会破坏 `.borderlessButton` 的外观**（标签和 ⌄ 都在，已截图核对）。
+     调手感：`pressedScale` 按下缩多少、`response` 快慢、`damping` 回弹几下
+     （< 1 才有回弹；0.42 ≈ 蹦两下、0.5 ≈ 轻微过冲、0.8 ≈ 基本不弹）。
+  开销：两者都是**事件驱动**的（弹出那一下 / 按下那一下），没有常驻定时器；
+  实测空闲仍是 **0.12% CPU**。
 - **存档在 `Backups/`（想回到哪一版就 `cp` 回来 + `./build.sh`）**：
   - `流光-v5-亮且浓-2026-09-16` ← **当前**（brightness 1.25 + alpha 0.46）
   - `流光-v4-纯光带-2026-09-16`（原亮度 + alpha 0.40，偏素）
