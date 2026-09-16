@@ -245,7 +245,12 @@ struct DashboardView: View {
                 Button {
                     NSApp.terminate(nil)
                 } label: {
-                    Label("退出", systemImage: "xmark.circle").font(.system(size: 11))
+                    // 字重 / 颜色对齐左边那三个菜单：`Menu` 的标签由
+                    // `.menuStyle(.borderlessButton)` 渲染（偏粗 + 主色），
+                    // 而 `.borderless` 的普通按钮标签更轻更淡，并排看会像两种样式。
+                    Label("退出", systemImage: "xmark.circle")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.primary)
                 }
                 .buttonStyle(.borderless)
             }
