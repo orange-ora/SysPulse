@@ -248,9 +248,16 @@ struct DashboardView: View {
                     // 字重 / 颜色对齐左边那三个菜单：`Menu` 的标签由
                     // `.menuStyle(.borderlessButton)` 渲染（偏粗 + 主色），
                     // 而 `.borderless` 的普通按钮标签更轻更淡，并排看会像两种样式。
-                    Label("退出", systemImage: "xmark.circle")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.primary)
+                    // 图标与文字**分开设样式**：左边那三个菜单的图标（时钟 / 分栏 / 电源）
+                    // 本身是细轮廓，而 `xmark.circle` 里的叉天生更粗 —— 不单独压一下，
+                    // 即使文字对齐了，图标还是会显得比它们重（用户："太丑了"）。
+                    HStack(spacing: 4) {
+                        Image(systemName: "xmark.circle")
+                            .font(.system(size: 11, weight: .regular))
+                        Text("退出")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.primary)
                 }
                 .buttonStyle(.borderless)
             }
