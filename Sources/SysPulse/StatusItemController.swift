@@ -113,8 +113,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 所以必须排除落在图标自身区域内的点击，否则每次点击都会先被这里关掉、
         // 再被按钮 action 重新打开，表现为"快速连点被吞"。
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard let self, self.popover.isShown else { return }
-            if self.isPointOnStatusItem(NSEvent.mouseLocation) { return }
+            guard let self else { return }
+            if self.isPointOnStatusItem(NSEvent.mouseLocation) {
+                // 点的是我们自己的图标：把系统的"按下高亮"按掉。
+                // 为什么：一次点击会被系统画**两次**底色 —— ①鼠标按下时的"按下高亮"、
+                // ②面板打开后的"选中高亮"，中间有段空档，用户看到的就是"点一次闪两下"。
+                // 按掉第①次，就只剩面板打开后那一次，观感是"点一下亮一下"。
+                // 丢到下一个 runloop 执行：全局监听是在系统处理这次点击**之前**跑的。
+                DispatchQueue.main.async { self.clearStatusItemHighlight() }
+                return
+            }
+            guard self.popover.isShown else { return }
             self.closePopoverIfShown()
         }
 
@@ -191,6 +200,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     deinit {
         NotificationCenter.default.removeObserver(self)
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+    }
+
+    /// 把状态栏项上的"按下高亮"清掉（选中高亮清不掉，见 README 开发备注）。
+    private func clearStatusItemHighlight() {
+        statusItem.button?.highlight(false)
+        statusItem.button?.cell?.isHighlighted = false
     }
 
     /// 判断某个屏幕坐标点是否落在状态栏图标上
@@ -360,7 +375,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 每次开合都重新决定，所以不需要"用完再恢复"—— 下一次开合会自己设回来。
     private func beginToggleAnimationDecision() {
         let isQuickRepeat = lastToggleAt.map { Date().timeIntervalSince($0) < quickToggleWindow } ?? false
-        popover.animates = !isQuickRepeat
+        popover.animates = preferences.panelAnimates && !isQuickRepeat
         lastToggleAt = Date()
     }
 

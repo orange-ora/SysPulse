@@ -96,6 +96,9 @@ struct DashboardView: View {
                 toggleChip("GPU", isOn: preferences.showGPU) { preferences.showGPU.toggle() }
                 toggleChip("内存", isOn: preferences.showMemory) { preferences.showMemory.toggle() }
                 toggleChip("流光", isOn: preferences.menuBarGlow) { preferences.menuBarGlow.toggle() }
+                // 「动画」= 面板开合是否走系统动画。关掉后开合瞬时（约 110ms）更跟手，
+                // 而且状态栏项那圈"高亮底"不会分成两次画（见 Preferences.panelAnimates 的注释）。
+                toggleChip("动画", isOn: preferences.panelAnimates) { preferences.panelAnimates.toggle() }
             }
             .padding(.top, 5)   // 标题行 7pt + 这里 5pt = 12pt，比卡片内「标题 / 进度条」再松一点
         }
