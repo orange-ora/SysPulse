@@ -36,8 +36,4 @@ final class LaunchAtLogin: ObservableObject {
         isEnabled = SMAppService.mainApp.status == .enabled
         return failure
     }
-
-    func refresh() {
-        isEnabled = SMAppService.mainApp.status == .enabled
-    }
 }

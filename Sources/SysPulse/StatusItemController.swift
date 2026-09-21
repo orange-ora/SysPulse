@@ -17,10 +17,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let preferences = Preferences.shared
     private var cancellables = Set<AnyCancellable>()
     private var outsideClickMonitor: Any?
-    /// 自己维护的开关状态：popover.isShown 在开合动画期间会滞后，不能用来判断
+    /// 自己维护的开关状态：`popover.isShown` 在**打开**方向会滞后，不能用来判断。
+    /// （⚠️ 实测只有 show 方向异步：`show()` → `popoverDidShow` 约 25~110ms；
+    ///  `performClose()` → `popoverDidClose` 在当前 `animates = false` 下是**同步重入**的，
+    ///  约 10ms 内就在 `performClose` 调用栈里回调完了。这一点是 `pendingToggle`
+    ///  和 `popoverDidClose` 里的顺序为什么现在踩不到坑的原因，改开合动画前先重读这两处。）
     private var isPanelOpen = false
-    /// 上一次 `popover.show` 用的锚点矩形，用来判断锚点是否真的动了
-    private var lastAnchorRect: NSRect?
     /// 上一次看到的状态栏窗口 **x**。
     ///
     /// 为什么只认 x、不认整个 frame：系统换档时**分两段**改状态栏窗口——
@@ -35,8 +37,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 正在跑的面板位移动画（nil = 没有）
     private var anchorAnimation: PanelAnchorAnimation?
     /// 面板位移动画时长：0.18 秒（用户 2026-09-16 选定）。
-    /// ⚠️ 代价是"换档到位"从 0.07 秒变成约 0.25 秒——观感更丝滑，但跟手感略降。
-    /// 这就是上一版把动画回滚掉的原因，这次是用户明确要求加回来的。
+    /// 实测 13 帧、193~201ms 收敛，所以"换档到位"从 0.07 秒变成**约 0.2 秒**——
+    /// 观感更丝滑，但跟手感略降。这就是上一版把动画回滚掉的原因，这次是用户明确要求加回来的。
     private let anchorAnimationDuration: CFTimeInterval = 0.18
     /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
     private var lastRenderedImageWidth: CGFloat?
@@ -254,7 +256,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         isAnimating = true
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: anchorRect(for: button), of: button, preferredEdge: .minY)
-        lastAnchorRect = anchorRect(for: button)
         // 初始定位用的是当前 frame：观测基准与定位基准一起记账，
         // 这样面板刚打开时不会被"误判成刚变化"而白等一次去抖。
         lastStatusWindowFrame = button.window?.frame
@@ -292,8 +293,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     ///   不需要去抖、预测或事后校正。
     /// - 唯一例外：w 与 x 是系统的两个属性、两次更新，极快连点（间隔 <20ms）时本拍可能读到
     ///   "新 x + 旧 w"，所以定位前**再读一次** frame。
-    /// - 这里**不做位移动画**（曾经用 CVDisplayLink 逐帧插值锚点做过，已按需求回滚）：
-    ///   `popover.show` 到新锚点是一帧到位。想要平滑滑动只能放弃 `NSPopover` 自绘面板。
+    /// - 这里最终走 `showPanel` → `movePanel` → **`PanelAnchorAnimation`（180ms 缓出滑动）**。
+    ///   ⚠️ 曾经这里写的是"不做位移动画、一帧到位"——那是**旧的 CVDisplayLink 版本**被回滚时的
+    ///   状态，早就过时了。**位移动画是用户明确要求保留的**（"移动丝滑一点"），
+    ///   回滚 Q 弹动画时刻意留了下来，别照着这句旧话把它删掉。
     private func syncPanelAnchor() {
         guard let button = statusItem.button, let win = button.window else { return }
         let frame = win.frame
@@ -308,17 +311,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
 
-    /// 以给定的状态栏窗口 frame 为中心重新锚定面板（一次到位，不做动画）。
+    /// 以给定的状态栏窗口 frame 为中心重新锚定面板（内部走 180ms 缓出滑动）。
     ///
-    /// 只在 `syncPanelAnchor` 确认"系统排版已完成"之后调用，拿到的是最终值，
-    /// 不需要预测、去抖或事后校正。
+    /// 只在 `syncPanelAnchor` 确认"系统排版已完成"之后调用，拿到的**目标**是最终值，
+    /// 不需要预测、去抖或事后校正；但**到位过程**是逐帧插值的动画（见 `movePanel`）。
     private func showPanel(at frame: NSRect, button btn: NSStatusBarButton) {
         lastStatusWindowFrame = frame
         lastSeenStatusWindowX = frame.minX
         movePanel(arrowTo: frame.midX, button: btn)
     }
 
-    /// 让面板的箭头对准屏幕横坐标 `screenX`（一次性摆好，不做动画）。
+    /// 让面板的箭头对准屏幕横坐标 `screenX`（单次 `show`；平滑移动由 `movePanel` 逐帧驱动）。
     ///
     /// 锚点用一个 1pt 的矩形表达：系统把面板**居中在锚点矩形上**，所以矩形中心就是箭头位置。
     /// ⚠️ 矩形必须落在按钮范围内，否则系统的 `show` 会被**静默忽略**（2026-09-16 实测）。
@@ -329,7 +332,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard localX >= 0.5, localX <= button.bounds.width - 0.5 else { return false }
         let rect = NSRect(x: localX - 0.5, y: 0, width: 1, height: button.bounds.height)
         popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
-        lastAnchorRect = rect
         return true
     }
 
@@ -371,12 +373,23 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         anchorAnimation = nil
         // 清掉观测基准：下次打开时重新按当时的窗口算
         lastSeenStatusWindowX = nil
-        lastAnchorRect = nil
-        finishAnimation()
+        // ⚠️ **释放内容必须在 `finishAnimation()` 之前**——顺序反了会踩一个实测确认过的坑：
+        // `finishAnimation()` 会消费 `pendingToggle` 并调用 `applyToggle()`，那是**重新打开面板**
+        // （此时 isPanelOpen 刚被置 false，走的是"打开"分支，会重新建 contentViewController 并 show）。
+        // 如果那句 `popover.contentViewController = nil` 写在它后面（这就是原来的写法），
+        // 就会把刚建好的内容控制器**又抹成 nil**。实测后果：`popover.isShown == true` 而
+        // `contentViewController == nil`，AppKit 随后强制收起这个空弹窗 ——
+        // 表现就是"动画期间连点被吞一次"，正是 pendingToggle 这套记账想避免的事。
+        //
+        // 当前 `animates = false` 下 `popoverDidClose` 是在 `performClose` 调用栈里**同步重入**的
+        // （实测约 10ms），所以关闭窗口期几乎为 0、`pendingToggle` 来不及被置位，这条踩不到；
+        // 但**一旦以后把开合动画打开**（`popover.animates = true`，README 里讨论过），
+        // `popoverDidClose` 就变成异步，这条立刻变成真 bug。所以现在就摆正。
         // 释放面板视图：不释放的话它会一直跟着数据每秒重绘，
         // 空闲 CPU 从 0.01% 涨到 0.05%。（窗口本身约 35MB 由 AppKit 持有，
         // 换掉弹窗对象也回收不了，只能等系统在内存紧张时压缩。）
         popover.contentViewController = nil
+        finishAnimation()
     }
 
     private func finishAnimation() {
@@ -394,6 +407,31 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func updateStatusItem(with snapshot: MetricsSnapshot, allowLayoutChange: Bool = true) {
         guard let button = statusItem.button else { return }
 
+        // ⚠️ **档位判定必须在取 `currentDensityIndex` 之前跑。**
+        //
+        // `adaptToAvailableSpace()` 改的是 `measuredDensityIndex`，而下面那句
+        // `let index = currentDensityIndex` 才是**本次真正渲染**的档位。
+        // 旧写法把它放在渲染之后，等于「这一拍做决策、下一拍才画出来」——
+        // 而"下一拍"是什么取决于谁还会再调一次这里：
+        //   · 流光开着 → 15fps 的下一帧，约 67ms 后（DEVLOG 实测"决策 2.02s → 画出 2.08s"就是它）
+        //   · **流光关着（默认值）→ 只剩数据刷新定时器，要再等一整个刷新周期**
+        //     2 秒刷新时就是白等 2 秒，加上判定本身需要的 2 拍，体感远不止文档记的 2.08 秒。
+        //
+        // 顺带解决第二个问题：这里读的是 `window.frame`。放在设 `button.image` **之前**读到的
+        // 才是与**当前图标**一致的位置；放在之后读到的是系统改窗口宽度的**中间态**
+        // —— 正是 `reanchorForPredictedResize` 花了一整份 DEVLOG 在防的那个值。
+        //
+        // 代价为零：`adaptToAvailableSpace()` 只读 `window.frame`（上一拍排版的结果）和偏好，
+        // 不依赖 `image`，也不依赖 `button.image` 是否已经设置。
+        //
+        // 只有"数据真的刷新了"这一次才允许重算排版档位。
+        // 流光的定时器每帧也会调用这里（allowLayoutChange: false）——如果让它也触发
+        // 升降档判定，就会以 15Hz 反复决策：测量值还没稳定就被下一次推翻，档位在
+        // full↔compact↔minimal 之间无限横跳（实测每秒一轮，菜单栏看起来像在"转"）。
+        if allowLayoutChange {
+            adaptToAvailableSpace()
+        }
+
         let index = currentDensityIndex
 
         // 菜单栏外观跟着壁纸明暗走，状态栏项按钮是最可靠的取样点
@@ -410,8 +448,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // （实测单行档 159pt vs 真实 213pt）。拿它当升档依据，会在**放不下**的时候把宽档
         // 升上去（升降判据用的是"升档后的左边缘"，宽度算小了自然算得下），
         // 结果窗口落进折叠区、完全不绘制，再花 5 拍退回来——实测 9.93 秒看不见图标。
-        let widthIsTrustworthy = !preferences.showGPU || snapshot.gpuUsage != nil
-        let metricSet = [preferences.showNetwork, preferences.showCPU, preferences.showMemory, preferences.showGPU]
+        // 三个条件里第三个（`gpuUnavailable`）是 2026-09-17 补的：没有它，在**本机根本没有
+        // GPU 计数器**的机器上（虚拟机、部分 Intel 核显）宽度会永远不记账 ——
+        // 三档宽度恒为 0 → `gain = iconWidth(wider) - iconWidth(target)` = `0 - 0` = 0 →
+        // 升档判据 `gain > 0` 永不成立 → 自动适应**只能降档、永远升不回去**
+        // （症状与 README bug 2「gain 变量顺序写反」一模一样，很容易查错方向）。
+        // 注意它和"数据还没到位"是两回事：后者绝不能记账（见上），前者必须记账。
+        // 两者的区分在 `GPUMonitor.unavailable`。
+        let gpuUsable = snapshot.gpuUsage != nil
+        let widthIsTrustworthy = !preferences.showGPU || gpuUsable || snapshot.gpuUnavailable
+        // `gpuUsable` 也放进这个"渲染形状键"：GPU 可用性一变，渲出来的宽度就变了，
+        // 必须把三档宽度重新量一遍（否则会一直用着缺 GPU 段时量到的偏小值）。
+        let metricSet = [preferences.showNetwork, preferences.showCPU, preferences.showMemory,
+                         preferences.showGPU, gpuUsable]
         if widthIsTrustworthy, !didPrimeDensityWidths || metricSet != primedMetricSet {
             primeDensityWidths(with: snapshot, appearance: appearance, metricSet: metricSet)
         }
@@ -426,13 +475,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         button.imagePosition = .imageOnly
         button.toolTip = MenuBarImage.tooltip(snapshot: snapshot)
 
-        // 只有"数据真的刷新了"这一次才允许重算排版档位。
-        // 流光的定时器每帧也会调用这里（allowLayoutChange: false）——如果让它也触发
-        // 升降档判定，就会以 15Hz 反复决策：测量值还没稳定就被下一次推翻，档位在
-        // full↔compact↔minimal 之间无限横跳（实测每秒一轮，菜单栏看起来在"转"）。
-        if allowLayoutChange {
-            adaptToAvailableSpace()
-        }
+        // ⚠️ 档位判定已经在函数**开头**跑过了（原因见那里的长注释：放在渲染之后会白等一拍，
+        // 流光关着时那一拍 = 一整个刷新周期）。这里**不要**再调用一次 `adaptToAvailableSpace()`。
 
         // 图标宽度/位置可能变了（切显示项、换排版档位、**启动时自动升档**）：
         // 只要当前锚点和上次对齐用的不一致，就把面板重新锚定一次。
@@ -554,10 +598,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard preferences.menuBarLayout == .auto else { return ceilingIndex }
         let measured = measuredDensityIndex ?? ceilingIndex
         return max(0, min(max(measured, ceilingIndex), densityOrder.count - 1))
-    }
-
-    private func resolvedDensity() -> MenuBarDensity {
-        densityOrder[currentDensityIndex]
     }
 
     /// 菜单栏项只要跨进刘海区域就完全不会被绘制，而右侧剩余宽度会随其他 App 的图标增减。

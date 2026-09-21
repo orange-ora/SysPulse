@@ -13,6 +13,9 @@ struct MetricsSnapshot {
     var gpuMemory: UInt64?
     /// GPU 核心数（Apple Silicon 上从 IOAccelerator 的 gpu-core-count 读）
     var gpuCores: Int?
+    /// 本机是否**确认**拿不到 GPU 计数器（见 `GPUMonitor.unavailable`）。
+    /// 用来把「数据还没到位」和「本机永远没有」分开——两者的宽度记账处置相反。
+    var gpuUnavailable: Bool = false
 
     var memoryUsed: UInt64 = 0
     var memoryTotal: UInt64 = 0
@@ -165,13 +168,23 @@ final class NetworkMonitor {
         return (mask - (previous & mask)) + (current & mask) + 1
     }
 
-    private static func counters() -> (rx: UInt64, tx: UInt64) {
+    /// 读一次所有 `en*` 的累计收发字节。
+    ///
+    /// ⚠️ **返回 nil 表示「这一拍没读到」，绝不能用 `(0, 0)` 冒充读数。**
+    /// 因为 0 一定小于上一次的值，会被 `delta` 判成「32 位计数器回绕」而走补偿分支，
+    /// 凭空算出一个 0~4 GiB 的差分（实测：上次 5 GB → 幻影 3.34 GiB；2 秒刷新周期下
+    /// 折合 **1795 MB/s** 的假读数），而且 `sample()` 里的 `&+=` 会把这笔幻影字节数
+    /// **永久**累加进「本次运行流量」——错了不会自愈。
+    ///
+    /// 什么时候会失败：第二次 `sysctl` 的缓冲区长度取自第一次调用，两次之间接口表
+    /// 一旦增长（VPN 连接/断开、插拔 USB 网卡、iPhone 共享网络）就会 ENOMEM。
+    private static func counters() -> (rx: UInt64, tx: UInt64)? {
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
         var length: size_t = 0
-        guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) >= 0, length > 0 else { return (0, 0) }
+        guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) >= 0, length > 0 else { return nil }
 
         var buffer = [UInt8](repeating: 0, count: length)
-        guard sysctl(&mib, u_int(mib.count), &buffer, &length, nil, 0) >= 0 else { return (0, 0) }
+        guard sysctl(&mib, u_int(mib.count), &buffer, &length, nil, 0) >= 0 else { return nil }
 
         var rx: UInt64 = 0
         var tx: UInt64 = 0
@@ -205,7 +218,10 @@ final class NetworkMonitor {
     }
 
     func sample() {
-        let current = NetworkMonitor.counters()
+        // 读不到就**整拍作废**：既不更新 downSpeed / upSpeed，也不更新 `last`。
+        // 不更新 `last` 是关键——下一拍成功时 elapsed 覆盖的是这整段间隔，
+        // 差分除以真实间隔仍然是正确均值，不会因为漏了一拍就把速率算飞。
+        guard let current = NetworkMonitor.counters() else { return }
         let now = Date().timeIntervalSinceReferenceDate
 
         if let last {
@@ -234,7 +250,39 @@ final class GPUMonitor {
     private(set) var memoryInUse: UInt64?
     private(set) var cores: Int?
 
+    /// 本机是否**确认**拿不到 GPU 计数器（虚拟机、部分 Intel 核显机型等）。
+    ///
+    /// 必须把两种 `utilization == nil` 分开，因为它们的正确处置**相反**：
+    /// - ①「刚启动、数据还没到位」—— 只是这几拍没有。此时**绝不能**记账宽度：
+    ///   缺了 GPU 段渲出来的宽度偏小（实测单行档 159pt vs 真实 213pt），
+    ///   拿它当升档依据会算出「装得下」，把宽档升到一个其实放不下的位置，
+    ///   窗口落进刘海折叠区、完全不绘制（README bug 6 实测 9.93 秒看不见图标）。
+    /// - ②「该机型根本没有」—— 永远不会有。此时**必须**照常记账：
+    ///   否则 `StatusItemController.widthIsTrustworthy` 永远为 false，
+    ///   三档宽度恒为 0 → `gain = 0 - 0 = 0` → 升档判据 `gain > 0` 永不成立，
+    ///   自动适应会**只能降档、永远升不回去**（症状与 README bug 2「gain 写反」一模一样）。
+    ///
+    /// 判据：连续 `unavailableAfterMisses` 拍都没能枚举到任何带
+    /// `PerformanceStatistics` 的 IOAccelerator 服务。真机上 IOAccelerator
+    /// 从开机就存在（哪怕利用率是 0），所以正常机器第一拍就会把它清掉；
+    /// 用「连续几拍」而不是「一拍」是为了躲开启动瞬间 IORegistry 尚未就绪的情况。
+    private(set) var unavailable = false
+    private var misses = 0
+    private let unavailableAfterMisses = 3
+
     func sample() {
+        // 无论从哪条路径离开都要更新「连续未命中」计数（含下面两个 early return）
+        var sawStatistics = false
+        defer {
+            if sawStatistics {
+                misses = 0
+                unavailable = false      // 一旦真的读到，就不再是「不可用」
+            } else {
+                misses += 1
+                if misses >= unavailableAfterMisses { unavailable = true }
+            }
+        }
+
         guard let matching = IOServiceMatching("IOAccelerator") else {
             utilization = nil
             memoryInUse = nil
@@ -264,6 +312,10 @@ final class GPUMonitor {
             guard IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS,
                   let dictionary = properties?.takeRetainedValue() as? [String: Any],
                   let statistics = dictionary["PerformanceStatistics"] as? [String: Any] else { continue }
+
+            // 见到任何一个带 PerformanceStatistics 的 IOAccelerator，就说明
+            // 这台机器有 GPU 计数器（哪怕这一拍恰好没有可用的利用率字段）
+            sawStatistics = true
 
             if let count = dictionary["gpu-core-count"] as? Int {
                 bestCores = max(bestCores ?? 0, count)

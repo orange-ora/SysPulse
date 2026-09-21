@@ -115,8 +115,8 @@ struct DashboardView: View {
     ///
     /// 三个排版细节：
     /// - 勾位用固定宽度的容器占宽，勾出现 / 消失时标签不会左右移动；
-    /// - 四个开关等宽铺满卡片（`maxWidth: .infinity` 均分），右侧不留缺口，
-    ///   也就和上面卡片里的进度条一样顶到同一条边缘；
+    /// - 五个开关（网速 / CPU / GPU / 内存 / 流光）等宽铺满卡片（`maxWidth: .infinity` 均分），
+    ///   右侧不留缺口，也就和上面卡片里的进度条一样顶到同一条边缘；
     /// - 关掉时标签用 `.secondary`、底色几乎只剩描边，一眼能分出开 / 关。
     private func toggleChip(_ title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -394,7 +394,8 @@ struct NetworkCard: View {
 struct IconBadge: View {
     let symbol: String
     let tint: Color
-    /// 徽章边长。上方四张卡片用默认 20pt；「显示项」用小一号，避免和标题抢注意力。
+    /// 徽章边长。上方四张卡片与「显示项」**统一用默认的 20pt**，
+    /// 这样两者的标题才落在同一条竖线上（见 `metricToggles` 的注释）。
     var size: CGFloat = 20
     /// 徽章内图标的字号。
     var iconSize: CGFloat = 10.5

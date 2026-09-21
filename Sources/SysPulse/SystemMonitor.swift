@@ -72,6 +72,7 @@ final class SystemMonitor: ObservableObject {
         next.gpuUsage = gpu.utilization
         next.gpuMemory = gpu.memoryInUse
         next.gpuCores = gpu.cores
+        next.gpuUnavailable = gpu.unavailable
         next.memoryUsed = memory.used
         next.memoryTotal = memory.total
         next.memoryFraction = memory.total > 0 ? Double(memory.used) / Double(memory.total) : 0
