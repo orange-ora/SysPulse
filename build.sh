@@ -39,6 +39,13 @@ mkdir -p "$BUILD/modulecache"
 
 COMMON_FLAGS=(
     -O -wmo
+    # ⚠️ **必须显式钉住 Swift 5 语言模式**，不能靠 swiftc 的默认值。
+    # 实测：同一份源码加 `-swift-version 6` 会直接报 12 个 error
+    # （Preferences.shared / LaunchAtLogin.shared / MenuBarImage.slotWidthCache /
+    #  SingleInstance.lockDescriptor 都不是并发安全的全局状态，Monitors 里还引用了
+    #  `vm_kernel_page_size` 这个可变全局量……）。现在能编过只是因为当前工具链默认落在
+    # Swift 5 模式；哪天 Xcode 把默认值改成 6，这个项目会毫无预兆地编不过。
+    -swift-version 5
     -module-cache-path "$PWD/$BUILD/modulecache"
     -framework IOKit
     -framework AppKit
@@ -84,6 +91,31 @@ cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
 if [ -f "Resources/AppIcon.icns" ]; then
     cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
+
+# 把构建指纹写进**打包后**的 Info.plist（必须在 codesign 之前）。
+#
+# 为什么需要：历史文档里反复出现"装的是不是新版本"这个坑 —— 比 md5 不行
+# （codesign 会改二进制内容），比时间戳也会被骗（安装时机不同）。
+# 现在一条命令就能确认：
+#   defaults read /Applications/SysPulse.app/Contents/Info CFBundleVersion
+#   defaults read /Applications/SysPulse.app/Contents/Info SysPulseBuildStamp
+# CFBundleVersion 用 git 提交数（单调递增、纯数字，系统也认）；
+# SysPulseBuildStamp 记短哈希 + 是否有未提交改动 + 构建时刻，用来反查是哪一版。
+BUILD_REV="unknown"; BUILD_COUNT=0; BUILD_DIRTY=""
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    BUILD_REV=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    BUILD_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+        BUILD_DIRTY="-dirty"     # 有未提交改动：装的东西不等于那个提交
+    fi
+fi
+BUILD_STAMP="${BUILD_REV}${BUILD_DIRTY}@$(date '+%Y%m%d-%H%M%S')"
+PLIST="$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_COUNT" "$PLIST" >/dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Set :SysPulseBuildStamp $BUILD_STAMP" "$PLIST" >/dev/null 2>&1 \
+    || /usr/libexec/PlistBuddy -c "Add :SysPulseBuildStamp string $BUILD_STAMP" "$PLIST" >/dev/null 2>&1 \
+    || true
+echo "    构建指纹: $BUILD_STAMP   (CFBundleVersion = $BUILD_COUNT)"
 
 codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || echo "    (临时签名跳过，本机仍可运行)"
 
