@@ -234,13 +234,30 @@ enum MenuBarImage {
         // 相邻光斑反向漂移时，两者之间的色相**差**基本守恒，所以"谁是蓝、谁是紫"的关系
         // 保持稳定，只有整体在轻轻游移。第一版是所有光斑各自漂 ±0.22（±79°）且相位相同，
         // 于是相邻区域会各自跑到不相关的地方（紫旁边突然变青或粉）—— 这正是"突兀"的来源。
+        // ⚠️ **配色按小米 HyperOS 启动图实测校准**（2026-09-30，用户提供的参考）。
+        //
+        // 那张图的 8×8 网格实测：**明度 90~100%（几乎是白的）、饱和度仅 7~18%**，
+        // 色相**左上 320~328°（粉紫）→ 右下 226~256°（蓝）**，是一条对角走向的极淡粉彩。
+        //
+        // 但菜单栏是**深色底 + 白字**（系统外观），照搬那个亮底会把文字涂掉。
+        // 所以按用户决定：**保留暗底，取它的色相、把明度压到暗底上**。
+        // 于是这里不是"照抄参考的 HSV"，而是"移植它的色相走向 + 把粉彩感翻译到暗底"：
+        //   色相 0.90 → 0.65  =  324°(粉紫) → 234°(蓝)   ← 对齐参考的两个端点
+        //   饱和度降到 0.90、不透明度大幅降到 0.26/0.13      ← 这才是"粉彩"，见下
+        //
+        // ⚠️ **不透明度是关键**：之前 alpha 给到 0.58/0.30，合成到深底上是
+        // H219~264° / S36~46% / V31~53% —— 又冷又艳，等于把深底涂成实色，
+        // 恰恰不是粉彩。粉彩 = 浅色 + 低饱和 + **低不透明度**，三者缺一不可。
+        // 现在合成后落在 S30~40% / V35~45%，是"暗底上浮着粉紫→蓝的柔雾"。
+        // 校准过程记录：alpha 0.26/0.13 时合成只有 V22~26%（比原版还暗，会"看不见"）；
+        // 0.40/0.20 配 brightness 1.0 才落到目标区间。
         let blobs: [Blob] = [
-            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.58, hueDrift:  1),
-            Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.62, hueDrift: -1),
-            Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.66, hueDrift:  1),
-            Blob(baseX: 0.58, baseY: 0.48, ampX: 0.06, ampY: 0.38, angle: 3.60, period: 11.9, radius: 1.90, hue: 0.70, hueDrift: -1),
-            Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.72, hueDrift:  1),
-            Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.74, hueDrift: -1),
+            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.90, hueDrift:  1),
+            Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.86, hueDrift: -1),
+            Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.80, hueDrift:  1),
+            Blob(baseX: 0.58, baseY: 0.48, ampX: 0.06, ampY: 0.38, angle: 3.60, period: 11.9, radius: 1.90, hue: 0.74, hueDrift: -1),
+            Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.69, hueDrift:  1),
+            Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.65, hueDrift: -1),
         ]
 
         for blob in blobs {
@@ -267,11 +284,11 @@ enum MenuBarImage {
             // `saturation` 取 0.70（流光是 >1 的过饱和）：漫散射的重叠更密，
             // 饱和度再高就会互相叠成实色、失去"漫散"的观感。
             let stops: [(CGFloat, CGFloat)] = [
-                (0.00, 0.58),
-                (0.45, 0.30),
+                (0.00, 0.40),
+                (0.45, 0.20),
                 (1.00, 0.00)
             ]
-            let colors = stops.map { NSColor(hue: hue, saturation: 0.55, brightness: 1.0, alpha: $0.1) }
+            let colors = stops.map { NSColor(hue: hue, saturation: 0.85, brightness: 1.0, alpha: $0.1) }
             let locations = stops.map { $0.0 }
             let center = NSPoint(x: cx, y: cy)
             NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
