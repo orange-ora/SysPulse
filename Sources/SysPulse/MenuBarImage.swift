@@ -234,7 +234,32 @@ enum MenuBarImage {
         // 相邻光斑反向漂移时，两者之间的色相**差**基本守恒，所以"谁是蓝、谁是紫"的关系
         // 保持稳定，只有整体在轻轻游移。第一版是所有光斑各自漂 ±0.22（±79°）且相位相同，
         // 于是相邻区域会各自跑到不相关的地方（紫旁边突然变青或粉）—— 这正是"突兀"的来源。
-        // ⚠️ **配色按小米 HyperOS 启动图实测校准**（2026-09-30，用户提供的参考）。
+        // ⚠️ **基调：淡紫 / 淡粉 / 藕粉，低饱和 + 高透明度，要"清新通透"。**
+        //
+        // 参数是**扫描出来的**，不是猜的：固定色相扫 (alpha, saturation) 网格，
+        // 看合成到深底后的 HSV，找"S 低（粉彩）+ V 够（看得见）"的甜点区 →
+        // **alpha 0.30 / saturation 0.35 落在 S26% / V51%**，正是"浅而透"。
+        //   alpha 更小（≤0.22）→ V 掉到 45% 以下，偏暗、不够"通透"；
+        //   saturation 更高（≥0.55）→ S 上到 33%+，就滑向"浓"了。
+        //
+        // ⚠️⚠️ **但这里有个被测出来的物理冲突，别以为调参能解决**：
+        // 本机菜单栏的**实际底色实测是 RGB(80,115,150) = H210°、饱和度已 44%**
+        // —— 那是**壁纸透过菜单栏毛玻璃**的结果，不是中性深灰。粉彩叠在这种蓝底上，
+        // **低浓度永远翻不过去**（实测：alpha 0.30 → 合成 H246° S21%，是"蓝灰"不是粉；
+        // 要让 R 通道压过 B、看着像粉，alpha 得 ≥0.60）。
+        // 所以"高透明度"和"看得出粉"在这台机器的这张壁纸上**不能同时满足**。
+        // 现在的取值是折中：**淡紫端给低浓度**（在蓝底上呈紫、不脏），
+        // **粉端给高浓度**（才翻得出粉）。若想更纯的粉，只能提高浓度、牺牲通透感；
+        // 若想更通透，就得接受它偏蓝紫。
+        // （参考：把菜单栏换成素色壁纸时底色会接近中性，那时低浓度就能显色。）
+        // 色相取 `0.72 → 0.93`（= 259° 淡紫 → 335° 淡粉），中间经过 302°/317° 的藕粉，
+        // 所以整条是 淡紫 → 藕粉 → 淡粉 的连续坡，不是几个独立颜色。
+        //
+        // ⚠️ **深色底上做浅色，必须靠低 alpha**：这既是"通透"的来源，也是唯一能
+        // 让浅色不与白字打架的办法。粉彩 = 浅色 + 低饱和 + 低不透明度，三者缺一不可。
+        //
+        // 以下是之前按小米 HyperOS 启动图（8×8 网格实测：明度 90~100%、饱和度仅 7~18%、
+        // 色相左上 320~328° 粉紫 → 右下 226~256° 蓝）校准时的记录，保留备查：
         //
         // 那张图的 8×8 网格实测：**明度 90~100%（几乎是白的）、饱和度仅 7~18%**，
         // 色相**左上 320~328°（粉紫）→ 右下 226~256°（蓝）**，是一条对角走向的极淡粉彩。
@@ -252,12 +277,12 @@ enum MenuBarImage {
         // 校准过程记录：alpha 0.26/0.13 时合成只有 V22~26%（比原版还暗，会"看不见"）；
         // 0.40/0.20 配 brightness 1.0 才落到目标区间。
         let blobs: [Blob] = [
-            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.90, hueDrift:  1),
-            Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.86, hueDrift: -1),
-            Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.80, hueDrift:  1),
-            Blob(baseX: 0.58, baseY: 0.48, ampX: 0.06, ampY: 0.38, angle: 3.60, period: 11.9, radius: 1.90, hue: 0.74, hueDrift: -1),
-            Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.69, hueDrift:  1),
-            Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.65, hueDrift: -1),
+            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.72, hueDrift:  1),
+            Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.78, hueDrift: -1),
+            Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.84, hueDrift:  1),
+            Blob(baseX: 0.58, baseY: 0.48, ampX: 0.06, ampY: 0.38, angle: 3.60, period: 11.9, radius: 1.90, hue: 0.88, hueDrift: -1),
+            Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.91, hueDrift:  1),
+            Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.93, hueDrift: -1),
         ]
 
         for blob in blobs {
@@ -284,11 +309,11 @@ enum MenuBarImage {
             // `saturation` 取 0.70（流光是 >1 的过饱和）：漫散射的重叠更密，
             // 饱和度再高就会互相叠成实色、失去"漫散"的观感。
             let stops: [(CGFloat, CGFloat)] = [
-                (0.00, 0.40),
-                (0.45, 0.20),
+                (0.00, 0.46),
+                (0.45, 0.22),
                 (1.00, 0.00)
             ]
-            let colors = stops.map { NSColor(hue: hue, saturation: 0.85, brightness: 1.0, alpha: $0.1) }
+            let colors = stops.map { NSColor(hue: hue, saturation: 0.55, brightness: 1.0, alpha: $0.1) }
             let locations = stops.map { $0.0 }
             let center = NSPoint(x: cx, y: cy)
             NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
