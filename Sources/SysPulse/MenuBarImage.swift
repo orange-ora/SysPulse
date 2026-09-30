@@ -350,7 +350,7 @@ enum MenuBarImage {
             // 全程最小 alpha 0.00 → 0.49，相邻色相跳变峰值 53.8° → 24°。
             let stops: [(CGFloat, CGFloat)] = [(0.00, 1.000), (0.60, 0.800), (0.85, 0.400), (1.00, 0.000)]
             let colors = stops.map {
-                NSColor(hue: hue, saturation: 0.46, brightness: 0.85, alpha: $0.1 * peakAlpha)
+                NSColor(hue: hue, saturation: 0.45, brightness: 0.90, alpha: $0.1 * peakAlpha)
             }
             let locations = stops.map { $0.0 }
 
