@@ -63,7 +63,7 @@ enum MenuBarImage {
         appearance: NSAppearance?,
         density: MenuBarDensity,
         effect: MenuBarEffect = .off,
-        effectPhase: Double? = nil
+        effectElapsed: Double? = nil
     ) -> NSImage? {
         let rows = buildRows(snapshot: snapshot, preferences: preferences, density: density)
         guard !rows.isEmpty else {
@@ -141,11 +141,11 @@ enum MenuBarImage {
         let image = NSImage(size: size, flipped: false) { _ in
             if let appearance {
                 appearance.performAsCurrentDrawingAppearance {
-                    drawEffect(size: size, effect: effect, phase: effectPhase)
+                    drawEffect(size: size, effect: effect, elapsed: effectElapsed)
                     draw()
                 }
             } else {
-                drawEffect(size: size, effect: effect, phase: effectPhase)
+                drawEffect(size: size, effect: effect, elapsed: effectElapsed)
                 draw()
             }
             return true
@@ -163,14 +163,20 @@ enum MenuBarImage {
     /// 一开始这里读的是全局单例，结果是：① 渲染函数不再可测（测试进程有自己的
     /// bundle id，读到的是它自己的默认值 `.off`，于是怎么渲都只有文字层）；
     /// ② 与同函数的 `density`（从参数传）不对称，埋一个"到底该信谁"的坑。
-    static func drawEffect(size: NSSize, effect: MenuBarEffect, phase: Double?) {
-        guard let phase else { return }
+    static func drawEffect(size: NSSize, effect: MenuBarEffect, elapsed: Double?) {
+        guard let elapsed else { return }
         switch effect {
         case .off: return
-        case .glow: drawGlow(size: size, phase: phase)
-        case .diffuse: drawDiffuse(size: size, phase: phase)
+        case .glow:
+            // 流光的相位推进速度由 drawGlow 里的 `turns` 决定，这里只做周期归一化
+            drawGlow(size: size, phase: (elapsed / effectGlowCycleSeconds).truncatingRemainder(dividingBy: 1))
+        case .diffuse:
+            drawDiffuse(size: size, elapsed: elapsed)
         }
     }
+
+    /// 流光走完一整圈所需秒数（漫散射不用它 —— 它按每个光点自己的 `period` 走）。
+    static let effectGlowCycleSeconds: Double = 12
 
     /// 漫散射层：几个柔和的径向光斑**各自沿不同方向、以不同速度游走**，互相叠加。
     ///
@@ -186,7 +192,7 @@ enum MenuBarImage {
     /// 对比 `drawGlow` 的 1 次横向渐变 + `drawRipple` 的 1 次，同量级。
     /// 注意整条动效的真实开销不在绘制（实测 0.13ms/帧），而在"每帧换一张状态栏图片"
     /// 那笔系统开销 —— 见 `contentKey` 的注释。
-    static func drawDiffuse(size: NSSize, phase: Double) {
+    static func drawDiffuse(size: NSSize, elapsed: Double) {
         let rect = NSRect(origin: .zero, size: size)
         // 裁到圆角胶囊里：光斑半径（1.3~1.7 倍条高）故意比条大，中心也游走出条外，
         // 不裁的话圆形渐变的直角边缘会在胶囊圆角处露出来。
@@ -212,6 +218,11 @@ enum MenuBarImage {
             let hue: CGFloat
             /// 色相呼吸方向（+1 / -1）。相邻取相反值，让色相关系保持稳定，见 blobs 的注释
             let hueDrift: CGFloat
+            /// 这个光点自己的时间相位偏移（0…1）。**互不相同**是关键，见 blobs 的注释
+            let phaseOffset: Double
+            /// 色相呼吸的相对幅度（0.6…1.4）。各光点不同，否则"同幅度只错相位"会留下
+            /// 共模分量，整条平均仍会缓慢漂移。
+            let amp: CGFloat
         }
 
         // ⚠️ **基准位置按等距铺满整条**（0.06 / 0.22 / 0.40 / 0.58 / 0.76 / 0.94）。
@@ -279,19 +290,19 @@ enum MenuBarImage {
         // 六个**基准**光斑的参数。用的时候按条的宽高比在它们之间插值取样
         // （见下面的 blobs 构造），而不是固定画 6 个 —— 原因见 `radiusY` 处的注释。
         let baseBlobs: [Blob] = [
-            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.72, hueDrift:  1),
-            Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.78, hueDrift: -1),
-            Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.84, hueDrift:  1),
-            Blob(baseX: 0.58, baseY: 0.48, ampX: 0.06, ampY: 0.38, angle: 3.60, period: 11.9, radius: 1.90, hue: 0.88, hueDrift: -1),
-            Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.91, hueDrift:  1),
-            Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.93, hueDrift: -1),
+            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.72, hueDrift:  1, phaseOffset: 0, amp: 1.0),
+            Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.78, hueDrift: -1, phaseOffset: 0, amp: 1.0),
+            Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.84, hueDrift:  1, phaseOffset: 0, amp: 1.0),
+            Blob(baseX: 0.58, baseY: 0.48, ampX: 0.06, ampY: 0.38, angle: 3.60, period: 11.9, radius: 1.90, hue: 0.88, hueDrift: -1, phaseOffset: 0, amp: 1.0),
+            Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.91, hueDrift:  1, phaseOffset: 0, amp: 1.0),
+            Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.93, hueDrift: -1, phaseOffset: 0, amp: 1.0),
         ]
 
         // 光斑数量随**宽高比**增加：窄条（两行档）少放几个，宽条（单行档）多放几个。
         // 每拍要画几次径向渐变 —— 实测 `drawGlow + drawRipple` 单次才 0.132ms，
         // 而这笔开销与"每帧换一张状态栏图片"的 ~8ms 相比可以忽略，所以多画几个无所谓。
         let aspect = size.width / max(size.height, 1)
-        let count = max(3, min(10, Int((aspect / 1.6).rounded())))
+        let count = max(2, min(4, Int((aspect / 4.0).rounded())))
         let blobs: [Blob] = (0..<count).map { i in
             // 在六个基准参数之间均匀取样（首尾相接，所以 6 个时就是原样）
             let t = Double(i) / Double(count) * Double(baseBlobs.count)
@@ -309,46 +320,76 @@ enum MenuBarImage {
                 period: a.period + (b.period - a.period) * Double(f),
                 radius: lerp(a.radius, b.radius),
                 hue: lerp(a.hue, b.hue),
-                hueDrift: (i % 2 == 0) ? 1 : -1
+                hueDrift: (i % 2 == 0) ? 1 : -1,
+                // **均匀铺开**且**关于 0.5 对称**（0, 1/N, …, (N-1)/N）——
+                // 这样各点的 sin 之和在任意 phase 下都接近 0，整条平均色相才会稳住
+                // （黄金分割比虽然分散均匀，但它对 0.5 有系统偏差，整条平均会缓慢漂 20°+）。
+                phaseOffset: Double(i) / Double(count),
+                // 各光点幅度也不同（0.6…1.4，用不可通约的步长散开）：
+                // 幅度相同时各点只是"错相位"，叠加后仍有共模分量 → 整条平均照样漂；
+                // 幅度也散开才是真正的"各自漫散"。
+                amp: 1.0 + 0.4 * CGFloat(sin(Double(i) * 2.399963))
             )
         }
 
         for blob in blobs {
-            let theta = 2 * .pi * CGFloat(phase) + blob.angle
+            let theta = 2 * .pi * CGFloat(elapsed / blob.period) + blob.angle
             let cx = (blob.baseX + cos(theta) * blob.ampX) * size.width
             let cy = (blob.baseY + sin(theta * 1.31) * blob.ampY) * size.height
 
-            // 色相：**整条一起缓慢游走**（所有光斑同向），而不是各自反向呼吸。
+            // ⚠️ **每个光点各自变化，不要让整条色带一起变。**
             //
-            // ⚠️ 这里换过两种做法，都踩了坑，记下来：
-            // ① 最初是各自漂 ±0.22 且同向 → 相邻区域色相差不停重组 → "东一块西一块"；
-            // ② 改成**相邻反相**的小幅呼吸（±0.06）→ 融合感好了，但反相会互相抵消，
-            //    整条的平均色相只摆 ±7°；
-            // ③ 把幅度加到 ±0.12 仍是 ±10° —— 证实抵消是主因，不是幅度不够。
-            // 现在是：**同向、慢速、围绕本色**游走。同向就不会抵消（整条平均色相跟着走），
-            // 慢速 + 围绕本色（±0.09 ≈ ±32°）则保住"相邻不会跳色"的融合感。
+            // 这条弯路走了三次，用户的原话正好把它们串起来：
+            //   · "东一块西一块、融合感不够" —— 光点**同向**各自大幅漂 ±0.22（±79°），
+            //     相邻区域的色相关系不停重组，局部就会突然跳色；
+            //   · 改成"相邻反相 ±0.06" —— 融合了，但**反相会互相抵消**，
+            //     整条平均只摆 ±7°，被反馈成"固定颜色了，不会再变色"；
+            //   · 我于是改成"整条同向一起游走" —— 颜色是动了，但用户立刻指出
+            //     "怎么是整条色带在整体变化？我想要的不是漫散射吗？"
+            //     **那是整体换色，不是漫散射**。方向本身就错了。
             //
-            // 用户对观感的原话依次是"东一块西一块、融合感不够" → "固定颜色了，不会再变色"，
-            // 这两句正好定义了这里要的区间：**变化要看得见，但相邻不能跳色**。
-            let hueDriftAmount: CGFloat = count >= 8 ? 0.09 : 0.07
-            var hue = blob.hue + hueDriftAmount * CGFloat(sin(2 * .pi * CGFloat(phase)))
+            // 正确的做法（现在）：给每个光点一个**自己的时间相位** ——
+            //   `wave = phase + 该光点的固定相位偏移`（黄金分割比 0.618 铺开，互不相同）。
+            //   ⚠️ **不要用"位置×波长"来生成相位**：波长长则所有点相位挨得近、一起动
+            //   （实测整条平均还摆 26~44°，用户看到的就是"整条色带在整体变化"）；
+            //   波长短则相邻点反相、互相抵消（实测每点摆幅掉到 25°）。
+            //   固定且互不相关的偏移才能既让每个点独立变化、又让整条平均稳住。
+            // 这样每个光点轮流发光、色相各自呼吸，**而相邻光点的色相差随时间变化**，
+            // 于是"哪个点偏紫、哪个点偏粉"会缓慢互换 —— 正是"从内而外的漫散"。
+            // 整条的平均色相基本不变（各自都在本色附近呼吸，只是不同步），
+            // 所以既不会变成整条换色，也不会互相抵消到看不见。
+            // ⚠️ **每个光点用自己的周期**，不是"同一个节奏错开起点"。
+            //
+            // 之前所有光点共用全局 `phase`（只让起点错开），它们仍然是**耦合**的 ——
+            // 实测整条平均色相还在缓慢漂 37°，用户看得出"整条在变"。
+            // 现在用 elapsed / 各自的 period 算**自己的相位**：period 在 9.3~15.1 秒之间
+            // 各不相同，于是各光点**互不同步、且不会长期同步回来**（周期不可通约），
+            // 这才是真正的"各自漫散"。
+            //
+            // 注意：整条平均色相会随之缓慢起伏（各光点周期不同、无法严格抵消），
+            // 但那是"各自的相位关系在变化"，不是"整条一起变" —— 观感上后者才叫色带整体变化。
+                        //
+            // `phase` 是 0…1 的全局相位，乘上全局周期就得到"已经过了多少秒"；
+            // 再除以这个光点自己的 period，就是它自己的相位。
+            // ⚠️ 两个周期必须**不可通约**（这里 9.3~15.1 与全局 12 秒都不是整数倍关系），
+            // 否则它们会周期性地重新同步成"一起变"。
+            let selfPhase = elapsed / blob.period + blob.phaseOffset
+            let pulse = CGFloat(sin(2 * .pi * selfPhase))
+
+            // 色相：围绕本色呼吸，幅度够大才看得见；相位由上面的 wave 决定（每个点不同步）
+            let hueDriftAmount: CGFloat = (count >= 8 ? 0.18 : (count >= 5 ? 0.14 : 0.10)) * blob.amp
+            var hue = blob.hue + hueDriftAmount * pulse
             hue = hue.truncatingRemainder(dividingBy: 1)
             if hue < 0 { hue += 1 }
 
-            // ⚠️ **半径必须按长宽各自缩放，不能只乘条高。**
-            //
-            // 原来写的是 `blob.radius * size.height`（只跟条高走）。于是同一个效果在不同
-            // 排版档位下强度完全不同：**条越宽，同样的圆半径摊开越稀、光斑重叠越少，
-            // 颜色就被稀释得越淡**。实测（同一时刻、同一配色）：
-            //   双行档（约 88pt 宽）→ 显出粉紫，用户认可
-            //   单行档（约 229pt 宽）→ 明显更淡更灰，用户反馈"色差严重"
-            // 按长宽各自缩放之后，覆盖与重叠密度在两个档位下才一致。
-            // 横向系数取得比纵向小：条的宽高比常在 3~8，用同一个半径会把光斑拉成
-            // 又扁又长的条，失去"光斑"的形状。
-            // 横向半径 = 纵向半径 × 宽高比修正：让光斑在横向也按"跟高度成比例"的密度铺开。
-            // 高度不变时它只跟高度走；条变宽时靠**数量**（上面 count）补覆盖，而不是把
-            // 每个光斑拉长 —— 这样三个排版档位的覆盖密度才一致。
-            let radiusX = blob.radius * size.height * 1.55
+            // 亮度/浓度也跟着脉动：脉冲为正时更亮更实 —— 这就是"从内向外发光"的那一下。
+            // 与色相同一个 wave，所以一个光点变亮时它的色相也正在偏离本色，观感是"活的"。
+            let alphaScale = 0.80 + 0.32 * pulse
+            // 半径也随时间脉动 —— 这是"从内而外"的关键：光点会自己涨大、缩小，
+            // 而不是只有颜色在变。`0.85 + 0.3*pulse` 的取值范围 0.55~1.15，
+            // 与色相共用同一个 selfPhase，所以一个光点"涨起来"时它的颜色也正在偏离本色。
+            let breathe = 0.85 + 0.30 * pulse
+            let radiusX = blob.radius * size.height * 0.85 * breathe
             let radiusY = blob.radius * size.height
             // `NSGradient` 只能画**圆**，要椭圆得靠 CTM 横向缩放（见下）。
             // 基准圆取纵向半径，横向压扁比例 = radiusX / radiusY。
@@ -356,8 +397,8 @@ enum MenuBarImage {
             // 径向渐变：中心最浓 → 中段渐隐 → 边缘完全透明，就是"柔和的光斑"。
             // 三段是为了让衰减接近高斯，只有两段会看出生硬的边界。
             let stops: [(CGFloat, CGFloat)] = [
-                (0.00, 0.52),
-                (0.45, 0.25),
+                (0.00, 0.62 * alphaScale),
+                (0.45, 0.30 * alphaScale),
                 (1.00, 0.00)
             ]
             let colors = stops.map { NSColor(hue: hue, saturation: 0.55, brightness: 1.0, alpha: $0.1) }

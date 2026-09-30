@@ -72,16 +72,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 取胜，而是靠**变化在时间上等步连续**。台阶到 8fps 会翻倍，那才是风险区。
     /// 10fps 是"台阶仍在 1 灰阶量级"与省电之间的拐点，故取此值（2026-09-30 选定）。
     private let effectFramesPerSecond: Double = 10
-    /// 相位走完一整圈所需秒数（周期）。相位步进 = 1 /（帧率 × 这个值）。
-    ///
-    /// 两个效果共用这一个时钟，所以切换效果时不会"跳一下"。**具体动多快由各效果自己决定**：
-    /// `drawGlow` 把 phase 乘上 `turns = 2.5` 横向推 2.5 个波长，`drawDiffuse` 则把
-    /// phase 当 0…1 的环绕量、按每个光斑自己的周期（9~15 秒）换算 —— 所以同一个相位步进，
-    /// 两个效果的观感速度并不相同，调快慢时以实际观感为准。
-    private let effectCycleSeconds: Double = 12
+    // 相位周期这个概念已废弃：定时器现在只累加**秒数**（`effectElapsed`），
+    // 各效果在自己的绘制函数里定义周期 —— 流光是 `MenuBarImage.effectGlowCycleSeconds`，
+    // 漫散射是每个光点自己的 `period`。这样"每个光点用自己的周期"才有可能。
     /// 背景动效的定时器与当前相位（0…1，两个效果共用同一个时钟）
     private var effectTimer: Timer?
-    private var effectPhase: Double = 0
+    /// 已经过的秒数（不是 0…1 相位）。各效果自己按自己的周期换算。
+    private var effectElapsed: Double = 0
     /// 屏幕不可见（休眠 / 锁屏 / 屏保）时挂起动效。挂起 != 关闭：
     /// 回来之后若用户开关仍为开，要自动续上。
     ///
@@ -266,8 +263,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         let interval = 1.0 / effectFramesPerSecond
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let step = 1.0 / (self.effectFramesPerSecond * self.effectCycleSeconds)
-            self.effectPhase = (self.effectPhase + step).truncatingRemainder(dividingBy: 1)
+            self.effectElapsed += 1.0 / self.effectFramesPerSecond
             self.updateStatusItem(with: self.monitor.snapshot, allowLayoutChange: false)
         }
         timer.tolerance = interval * 0.1
@@ -278,7 +274,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func stopEffectTimer() {
         effectTimer?.invalidate()
         effectTimer = nil
-        effectPhase = 0
+        effectElapsed = 0
     }
 
     deinit {
@@ -552,7 +548,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             appearance: appearance,
             density: densityOrder[index],
             effect: preferences.menuBarEffect,
-            effectPhase: preferences.menuBarEffect != .off ? effectPhase : nil
+            effectElapsed: preferences.menuBarEffect != .off ? effectElapsed : nil
         )
         // 宽度记账（升档判据靠它算"更宽那档要多占多少"）：
         // ⚠️ 数据还没到位那一次渲染里 GPU 段会**整段缺失**，量出来的宽度偏小
