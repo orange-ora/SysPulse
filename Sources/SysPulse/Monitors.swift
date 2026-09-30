@@ -28,6 +28,10 @@ struct MetricsSnapshot {
     var totalDown: UInt64 = 0
     var totalUp: UInt64 = 0
 
+    /// GPU 是否**有计数器可用**。宽度记账用它判断"要不要因为 GPU 段缺失而重量三档宽度"，
+    /// 不能改用 `gpuUsage != nil` —— 节流跳采时那个值会被沿用，分不出"没采"和"采了没值"。
+    var gpuAvailable: Bool = true
+
     var uptime: TimeInterval = 0
     var processCount: Int = 0
     var timestamp = Date()
@@ -168,6 +172,23 @@ final class NetworkMonitor {
         return (mask - (previous & mask)) + (current & mask) + 1
     }
 
+    /// 复用的 sysctl 缓冲与接口名缓存。
+    ///
+    /// 为什么要有：`NetworkMonitor.sample` 原本每拍做两件事都很浪费 ——
+    /// ① 每拍 `[UInt8](repeating: 0, count: length)` 新分配一块（几 KB）缓冲，用完就扔；
+    /// ② 对表里**每一个**接口都调一次 `if_indextoname` 并造一个 `String`，
+    ///    只为判断它是不是 `en*`，而实际上真正要统计的只有 1~2 个。
+    /// 实测 `NetworkMonitor.sample` 410µs/次（2026-09-30，占空闲基线约 25%）。
+    ///
+    /// 改成：缓冲留作实例属性按需增长复用；接口名按 index 缓存（接口 index 在进程生命周期内
+    /// 不会重编号，但插拔网卡会新增 index，所以是缓存而不是一次性快照）。
+    ///
+    /// ⚠️ 尺寸缓存必须**允许增长**：两次 `sysctl` 之间接口表一旦变大（VPN 连断、插拔 USB 网卡、
+    /// iPhone 共享网络），旧尺寸会直接 ENOMEM。所以失败且 `length` 变大时就重分配再试一次，
+    /// 而不是把旧缓冲硬套上去。
+    private var buffer: [UInt8] = []
+    private var interfaceNameCache: [UInt16: String] = [:]
+
     /// 读一次所有 `en*` 的累计收发字节。
     ///
     /// ⚠️ **返回 nil 表示「这一拍没读到」，绝不能用 `(0, 0)` 冒充读数。**
@@ -178,13 +199,22 @@ final class NetworkMonitor {
     ///
     /// 什么时候会失败：第二次 `sysctl` 的缓冲区长度取自第一次调用，两次之间接口表
     /// 一旦增长（VPN 连接/断开、插拔 USB 网卡、iPhone 共享网络）就会 ENOMEM。
-    private static func counters() -> (rx: UInt64, tx: UInt64)? {
+    /// 下面失败后重试一次正是为了吃掉这种情况。
+    private func counters() -> (rx: UInt64, tx: UInt64)? {
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
-        var length: size_t = 0
-        guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) >= 0, length > 0 else { return nil }
+        var length: size_t = buffer.count
 
-        var buffer = [UInt8](repeating: 0, count: length)
-        guard sysctl(&mib, u_int(mib.count), &buffer, &length, nil, 0) >= 0 else { return nil }
+        if length == 0 {
+            guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) >= 0, length > 0 else { return nil }
+            buffer = [UInt8](repeating: 0, count: length)
+        }
+
+        if sysctl(&mib, u_int(mib.count), &buffer, &length, nil, 0) < 0 {
+            // 尺寸不够（接口表变大了）：按新尺寸重分配再试一次
+            guard length > buffer.count else { return nil }
+            buffer = [UInt8](repeating: 0, count: length)
+            guard sysctl(&mib, u_int(mib.count), &buffer, &length, nil, 0) >= 0 else { return nil }
+        }
 
         var rx: UInt64 = 0
         var tx: UInt64 = 0
@@ -197,12 +227,14 @@ final class NetworkMonitor {
                 let messageLength = Int(header.ifm_msglen)
                 guard messageLength > 0 else { break }
 
-                if Int32(header.ifm_type) == RTM_IFINFO2,
-                   let name = NetworkMonitor.interfaceName(header.ifm_index),
-                   name.hasPrefix("en") {
-                    let message = base.advanced(by: offset).assumingMemoryBound(to: if_msghdr2.self).pointee
-                    rx += UInt64(message.ifm_data.ifi_ibytes)
-                    tx += UInt64(message.ifm_data.ifi_obytes)
+                if Int32(header.ifm_type) == RTM_IFINFO2 {
+                    // 只有 `en*` 才计入。接口名按 index 缓存 —— 原来对表里每个接口
+                    // 都调一次 if_indextoname 并造 String，而绝大多数都不是 en*。
+                    if let name = interfaceName(header.ifm_index), name.hasPrefix("en") {
+                        let message = base.advanced(by: offset).assumingMemoryBound(to: if_msghdr2.self).pointee
+                        rx += UInt64(message.ifm_data.ifi_ibytes)
+                        tx += UInt64(message.ifm_data.ifi_obytes)
+                    }
                 }
                 offset += messageLength
             }
@@ -211,17 +243,20 @@ final class NetworkMonitor {
         return (rx, tx)
     }
 
-    private static func interfaceName(_ index: UInt16) -> String? {
+    private func interfaceName(_ index: UInt16) -> String? {
+        if let cached = interfaceNameCache[index] { return cached }
         var name = [CChar](repeating: 0, count: Int(IF_NAMESIZE) + 1)
         guard if_indextoname(UInt32(index), &name) != nil else { return nil }
-        return String(cString: name)
+        let resolved = String(cString: name)
+        interfaceNameCache[index] = resolved
+        return resolved
     }
 
     func sample() {
         // 读不到就**整拍作废**：既不更新 downSpeed / upSpeed，也不更新 `last`。
         // 不更新 `last` 是关键——下一拍成功时 elapsed 覆盖的是这整段间隔，
         // 差分除以真实间隔仍然是正确均值，不会因为漏了一拍就把速率算飞。
-        guard let current = NetworkMonitor.counters() else { return }
+        guard let current = counters() else { return }
         let now = Date().timeIntervalSinceReferenceDate
 
         if let last {
@@ -269,6 +304,14 @@ final class GPUMonitor {
     private(set) var unavailable = false
     private var misses = 0
     private let unavailableAfterMisses = 3
+
+    /// 本机是否**拿到了** GPU 计数器（= `unavailable` 的反面，含"数据还没到位"）。
+    ///
+    /// 宽度记账用的是这个、而不是 `snapshot.gpuUsage != nil`：**采集节流之后**
+    /// 跳过的那些拍会沿用上一次的 `utilization`，于是"这一拍没采"和"这一拍采了但没有值"
+    /// 在快照上看起来一样，`gpuUsage != nil` 就分不出来了。而 GPU 可用性一变，
+    /// 三档宽度必须重量 —— 漏掉就会一直用着缺 GPU 段时量到的偏小值（README bug 6）。
+    var available: Bool { !unavailable }
 
     func sample() {
         // 无论从哪条路径离开都要更新「连续未命中」计数（含下面两个 early return）

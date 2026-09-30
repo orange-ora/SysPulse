@@ -560,7 +560,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // （症状与 README bug 2「gain 变量顺序写反」一模一样，很容易查错方向）。
         // 注意它和"数据还没到位"是两回事：后者绝不能记账（见上），前者必须记账。
         // 两者的区分在 `GPUMonitor.unavailable`。
-        let gpuUsable = snapshot.gpuUsage != nil
+        // 用 `gpuAvailable`（取自 `GPUMonitor.available`）而**不是** `gpuUsage != nil`：
+        // 采集节流之后跳过的拍会沿用上一次的 utilization，"没采"和"采了没值"在快照上
+        // 看起来一样，拿 gpuUsage 判断就会在节流窗口里漏掉 GPU 可用性的变化。
+        let gpuUsable = snapshot.gpuAvailable
         let widthIsTrustworthy = !preferences.showGPU || gpuUsable || snapshot.gpuUnavailable
         // `gpuUsable` 也放进这个"渲染形状键"：GPU 可用性一变，渲出来的宽度就变了，
         // 必须把三档宽度重新量一遍（否则会一直用着缺 GPU 段时量到的偏小值）。
