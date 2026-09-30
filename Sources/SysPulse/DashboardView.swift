@@ -155,10 +155,16 @@ struct DashboardView: View {
     /// "开/关"型开关语义不同 —— 它是三态，用眼睛图标一眼能看出"当前没有背景动效"。
     ///
     /// ⚠️ **这个胶囊的外观是一张整图，不是 SwiftUI 视图**（原因见 `effectChipImage`）。
-    /// 开启时是**橙色圆角圈 + 橙色星星 + 白字**；关闭时是灰圈 + 灰眼睛 + 灰字。
+    /// 开启时是**橙色圆角圈 + 橙色星星 + 白字 + 中性底**（底色不带颜色，见 `effectChipImage`）；
+    /// 关闭时是灰圈 + 灰眼睛 + 灰字。
     /// 左边四个开关的绿胶囊是另一套视图（`toggleChip`），**两者互不影响**。
     ///
     /// 把 SF Symbol 染成指定颜色，返回**非模板**图片（`isTemplate = false`）。
+    ///
+    /// ⚠️ `color` 必须是**不透明**颜色，别传 `.clear` 想表达"不染色"：这里靠
+    /// `sourceAtop` 铺色，而 `sourceAtop` 的结果是 `S·Da + D·(1−Sa)`，源 alpha 为 0 时
+    /// 结果**恒等于原图**（不是变透明），于是符号保留 SF Symbol 的默认黑。
+    /// 2026-10-01 实测踩过：关闭态传 `.clear`，深色面板上量到 `(0,0,0)`、191 个近黑像素的眼睛。
     private static func tintedSymbol(_ name: String, color: NSColor, pointSize: CGFloat) -> NSImage? {
         let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .bold)
         guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
@@ -187,6 +193,17 @@ struct DashboardView: View {
     /// 前者按目标缩放**重新光栅化**，2x 屏上文字才清晰（与状态栏图片同一套做法）。
     private static func effectChipImage(title: String, isOn: Bool, tint: NSColor,
                                         isDark: Bool) -> NSImage {
+        // ⚠️ 这张图里**一律不用语义色**（`secondaryLabelColor` 之类）。两个实测原因：
+        //   ① 离屏上下文的外观不跟随面板（`NSColor.labelColor` 会解析成黑，见 `isDarkAppearance`）；
+        //   ② 语义色**自带 alpha**，`withAlphaComponent()` 与它**相乘**：实测
+        //      `secondaryLabelColor.withAlphaComponent(0.10)` 铺出来只比面板底色高 **6 个灰阶**
+        //      （约 5% 白），底板等于没有 —— 2026-10-01 在真机面板上量到。
+        // 改成按 `isDark` 显式给「白 / 黑 + alpha」：底板 Δ+12~16、灰圈 Δ+50，清清楚楚。
+        let neutral = isDark ? NSColor.white : NSColor.black
+        let plate = neutral.withAlphaComponent(0.10)        // 中性地板，与左边开关同档（primary 0.06~0.16）
+        let ringOff = neutral.withAlphaComponent(0.22)      // 关闭态灰圈
+        let inkOff = NSColor(white: isDark ? 0.72 : 0.38, alpha: 1)   // 关闭态灰字 / 灰眼睛
+
         let font = NSFont.systemFont(ofSize: 10.5, weight: isOn ? .semibold : .regular)
         let iconSide: CGFloat = 11
         let hPad: CGFloat = 8, vPad: CGFloat = 4, gap: CGFloat = 4
@@ -197,21 +214,23 @@ struct DashboardView: View {
             // 不给就是**纯黑**（实测踩过：深色面板上文字直接消失）。
             // ⚠️ 也不能用 `NSColor.labelColor` —— 离屏上下文的外观不跟随面板，
             // 解析出来同样是黑的。所以外观由调用方按 `NSApp` 实际外观显式传进来。
-            .foregroundColor: isOn ? (isDark ? NSColor.white : NSColor.black)
-                                   : NSColor.secondaryLabelColor
+            .foregroundColor: isOn ? (isDark ? NSColor.white : NSColor.black) : inkOff
         ])
         let textSize = attributed.size()
         let size = NSSize(width: hPad * 2 + iconSide + gap + ceil(textSize.width),
                           height: vPad * 2 + max(iconSide, ceil(textSize.height)))
+        // ⚠️ 关闭态的图标要显式给灰（不能传 `.clear`，见 `tintedSymbol` 的说明）
         let icon = tintedSymbol(isOn ? "sparkles" : "eye.slash",
-                                color: isOn ? tint : .clear, pointSize: 9)
+                                color: isOn ? tint : inkOff, pointSize: 9)
         let image = NSImage(size: size, flipped: false) { _ in
-            // 圆角圈：橙色描边 + 一层很淡的橙色底（与左边四个绿胶囊同一套做法，只换颜色）
+            // 圆角圈：**橙色描边 + 不带颜色的中性底**。
+            // ⚠️ 底色曾经是 `tint.withAlphaComponent(0.16)`（淡橙），用户 2026-10-01 要求
+            // **底色不要用橙色、干脆不用颜色**：描边和星星保持橙色，只有内部这层地板改成中性。
             let rect = NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
             let path = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
-            (isOn ? tint.withAlphaComponent(0.16) : NSColor.secondaryLabelColor.withAlphaComponent(0.10)).setFill()
+            plate.setFill()
             path.fill()
-            (isOn ? tint.withAlphaComponent(0.75) : NSColor.secondaryLabelColor.withAlphaComponent(0.25)).setStroke()
+            (isOn ? tint.withAlphaComponent(0.75) : ringOff).setStroke()
             path.lineWidth = 1
             path.stroke()
             if let icon {

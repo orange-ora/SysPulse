@@ -66,6 +66,44 @@ macOS 菜单栏实时系统监控：**网速、内存、CPU、GPU** 一目了然
 这样所有标题在同一列对齐，未选中项也不会留下任何痕迹。
 （`.clear` 和近零透明度在菜单里会被忽略，仍会显示一个淡勾，只能用空格占位。）
 
+### 效果胶囊：为什么它是「一整张图片」
+
+那一行最右边是背景效果选择（关闭 / 流光 / 漫散射）。它的外观是一张**非模板 `NSImage`**
+（`DashboardView.effectChipImage`），不是 SwiftUI 视图 —— 因为这个胶囊用了
+`.menuStyle(.borderlessButton)`，系统渲染标签时会把 SwiftUI 视图**扁平化**，
+颜色基本都会丢。逐项实测（截屏逐像素扫面板）：
+
+| 写法 | 结果 |
+| --- | --- |
+| `.foregroundStyle(.green)` | **无效**（原来写的 `Color.green` 从来没生效过，图标一直是系统前景色）|
+| `.background(Capsule().fill(Color.orange))` | **整块丢掉**（量到 `(59,59,62)` 对底色 `(59,59,61)`，只差 1/255）|
+| `.background(Image(nsImage: 非模板胶囊))` | 同样丢掉 |
+| 胶囊放进内容当 ZStack 兄弟 | 画得出来，但**布局错乱**（胶囊和文字并排、图标被压住）|
+
+唯一稳定的路子是**内容里放非模板图片**（`isTemplate = false`，按自身像素绘制，系统染不动它），
+所以整块胶囊（圆角圈 + 图标 + 文字）画成一张 `NSImage`。
+用 `NSImage(size:flipped:drawingHandler:)` 而不是 `lockFocus`：前者按目标缩放**重新光栅化**，
+2x 屏上文字才清晰（和状态栏图片同一套做法）。
+
+当前样式：**开启态 = 橙色圆角圈 + 橙色星星 + 白字 + 无色中性底**；
+**关闭态 = 灰圈 + 灰眼睛 + 灰字**。左边四个开关（网速 / CPU / GPU / 内存）的绿胶囊是另一套
+视图（`toggleChip`），**两者互不影响**。对照图：`Resources/面板胶囊-开与关-2026-10-01.png`。
+
+⚠️ 三个必须记住的坑（都实测踩过，别往回改）：
+
+- **文字必须显式给前景色**。`NSAttributedString.draw` 在离屏上下文里没有默认前景色，
+  不给就是**纯黑** —— 深色面板上文字直接消失。
+- **离屏上下文里不要用语义色**。`@Environment(\.colorScheme)` 在面板这个 popover 里报
+  **light**（面板实际是深色）；`NSColor.labelColor` / `secondaryLabelColor` 的解析同样不跟随面板。
+  而且语义色**自带 alpha**，`withAlphaComponent()` 与它**相乘**：实测
+  `secondaryLabelColor.withAlphaComponent(0.10)` 铺出来只比面板底色高 **6 个灰阶**（约 5% 白），
+  底板等于没有。一律按 `NSApp.effectiveAppearance` 判断外观、显式给「白 / 黑 + alpha」
+  （改后底板 Δ+12~16、灰圈 Δ+50）。
+- **`.clear` 不等于「不染色」**。给 SF Symbol 铺色用的是 `sourceAtop`，其结果恒等于
+  `S·Da + D·(1−Sa)`，源 alpha 为 0 时**原图原样保留**（不是变透明），于是符号留着 SF Symbol
+  的默认黑 —— 关闭态曾经因此在深色面板上出现一个**纯黑眼睛**（量到 `(0,0,0)`，修好后该区域
+  近黑像素 `191px → 0px`）。
+
 ## 环境要求
 
 - macOS 14 或更高（已在 macOS 27 + Apple M5 上验证）
