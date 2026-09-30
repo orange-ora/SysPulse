@@ -276,7 +276,9 @@ enum MenuBarImage {
         // 现在合成后落在 S30~40% / V35~45%，是"暗底上浮着粉紫→蓝的柔雾"。
         // 校准过程记录：alpha 0.26/0.13 时合成只有 V22~26%（比原版还暗，会"看不见"）；
         // 0.40/0.20 配 brightness 1.0 才落到目标区间。
-        let blobs: [Blob] = [
+        // 六个**基准**光斑的参数。用的时候按条的宽高比在它们之间插值取样
+        // （见下面的 blobs 构造），而不是固定画 6 个 —— 原因见 `radiusY` 处的注释。
+        let baseBlobs: [Blob] = [
             Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.72, hueDrift:  1),
             Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.78, hueDrift: -1),
             Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.84, hueDrift:  1),
@@ -284,6 +286,32 @@ enum MenuBarImage {
             Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.91, hueDrift:  1),
             Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.93, hueDrift: -1),
         ]
+
+        // 光斑数量随**宽高比**增加：窄条（两行档）少放几个，宽条（单行档）多放几个。
+        // 每拍要画几次径向渐变 —— 实测 `drawGlow + drawRipple` 单次才 0.132ms，
+        // 而这笔开销与"每帧换一张状态栏图片"的 ~8ms 相比可以忽略，所以多画几个无所谓。
+        let aspect = size.width / max(size.height, 1)
+        let count = max(3, min(10, Int((aspect / 1.6).rounded())))
+        let blobs: [Blob] = (0..<count).map { i in
+            // 在六个基准参数之间均匀取样（首尾相接，所以 6 个时就是原样）
+            let t = Double(i) / Double(count) * Double(baseBlobs.count)
+            let i0 = Int(t) % baseBlobs.count
+            let i1 = (i0 + 1) % baseBlobs.count
+            let f = CGFloat(t - Double(Int(t)))
+            let a = baseBlobs[i0], b = baseBlobs[i1]
+            func lerp(_ x: CGFloat, _ y: CGFloat) -> CGFloat { x + (y - x) * f }
+            return Blob(
+                baseX: Double(i) / Double(count) + 0.5 / Double(count),   // 等距铺满
+                baseY: lerp(a.baseY, b.baseY),
+                ampX: lerp(a.ampX, b.ampX),
+                ampY: lerp(a.ampY, b.ampY),
+                angle: lerp(a.angle, b.angle),
+                period: a.period + (b.period - a.period) * Double(f),
+                radius: lerp(a.radius, b.radius),
+                hue: lerp(a.hue, b.hue),
+                hueDrift: (i % 2 == 0) ? 1 : -1
+            )
+        }
 
         for blob in blobs {
             let theta = 2 * .pi * CGFloat(phase) + blob.angle
@@ -298,26 +326,48 @@ enum MenuBarImage {
             hue = hue.truncatingRemainder(dividingBy: 1)
             if hue < 0 { hue += 1 }
 
-            let radius = blob.radius * size.height
+            // ⚠️ **半径必须按长宽各自缩放，不能只乘条高。**
+            //
+            // 原来写的是 `blob.radius * size.height`（只跟条高走）。于是同一个效果在不同
+            // 排版档位下强度完全不同：**条越宽，同样的圆半径摊开越稀、光斑重叠越少，
+            // 颜色就被稀释得越淡**。实测（同一时刻、同一配色）：
+            //   双行档（约 88pt 宽）→ 显出粉紫，用户认可
+            //   单行档（约 229pt 宽）→ 明显更淡更灰，用户反馈"色差严重"
+            // 按长宽各自缩放之后，覆盖与重叠密度在两个档位下才一致。
+            // 横向系数取得比纵向小：条的宽高比常在 3~8，用同一个半径会把光斑拉成
+            // 又扁又长的条，失去"光斑"的形状。
+            // 横向半径 = 纵向半径 × 宽高比修正：让光斑在横向也按"跟高度成比例"的密度铺开。
+            // 高度不变时它只跟高度走；条变宽时靠**数量**（上面 count）补覆盖，而不是把
+            // 每个光斑拉长 —— 这样三个排版档位的覆盖密度才一致。
+            let radiusX = blob.radius * size.height * 1.55
+            let radiusY = blob.radius * size.height
+            // `NSGradient` 只能画**圆**，要椭圆得靠 CTM 横向缩放（见下）。
+            // 基准圆取纵向半径，横向压扁比例 = radiusX / radiusY。
+            let scaleX = radiusX / max(radiusY, 0.001)
             // 径向渐变：中心最浓 → 中段渐隐 → 边缘完全透明，就是"柔和的光斑"。
             // 三段是为了让衰减接近高斯，只有两段会看出生硬的边界。
-            //
-            // 浓度值是**按实测对齐流光调的**（流光整体 alpha 均值 0.506，10 段均匀分布在
-            // 0.39~0.57）。第一版一味压低，结果整体只有 0.256~0.299 —— 只有流光的一半，
-            // 用户的原话是"这么淡，看不见啊"。
-            // 现在中心 0.58、中段 0.30，相邻光斑重叠后整体落在 0.45~0.55，与流光同级。
-            // `saturation` 取 0.70（流光是 >1 的过饱和）：漫散射的重叠更密，
-            // 饱和度再高就会互相叠成实色、失去"漫散"的观感。
             let stops: [(CGFloat, CGFloat)] = [
-                (0.00, 0.46),
-                (0.45, 0.22),
+                (0.00, 0.52),
+                (0.45, 0.25),
                 (1.00, 0.00)
             ]
             let colors = stops.map { NSColor(hue: hue, saturation: 0.55, brightness: 1.0, alpha: $0.1) }
             let locations = stops.map { $0.0 }
-            let center = NSPoint(x: cx, y: cy)
-            NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
-                .draw(fromCenter: center, radius: 0, toCenter: center, radius: radius, options: [])
+
+            // 归一化空间画法：先把 CTM 映射到「单位正方形 → size」，那么横向压扁
+            // 就与条的实际宽高比无关，`scaleX` 的含义保持稳定（否则每种排版档位
+            // 都要重算一遍系数）。裁剪路径是之前在当前 CTM 下设置的，仍按设备坐标生效。
+            NSGraphicsContext.saveGraphicsState()
+            if let cg = NSGraphicsContext.current?.cgContext {
+                cg.scaleBy(x: size.width, y: size.height)
+                cg.translateBy(x: cx / size.width, y: cy / size.height)
+                cg.scaleBy(x: scaleX, y: 1)
+                let normalizedRadius = radiusY / max(size.height, 0.001)
+                NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
+                    .draw(fromCenter: .zero, radius: 0,
+                          toCenter: .zero, radius: normalizedRadius, options: [])
+            }
+            NSGraphicsContext.restoreGraphicsState()
         }
 
         NSGraphicsContext.restoreGraphicsState()
