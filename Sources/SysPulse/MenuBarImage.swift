@@ -212,13 +212,21 @@ enum MenuBarImage {
             let hue: CGFloat
         }
 
+        // ⚠️ **基准位置按等距铺满整条**（0.06 / 0.22 / 0.40 / 0.58 / 0.76 / 0.94）。
+        //
+        // 第一版把基准挤在 0.15~0.80、又给了较大的横向游走幅度，结果是
+        // **整条迟迟铺不满**：光斑漂到条外时那一端直接是空的（实测首尾空隙最低到 0.00，
+        // 也就是某一端完全没颜色），而中间又堆到 0.58 —— 用户看到的就是"颜色挤在中间一小块"。
+        // 等距铺开之后，无论各光斑怎么游走，整条都始终有覆盖，只有**浓度**在起伏。
+        //
+        // 每段的游走方向仍各不相同（`angle`），所以观感依然"不拘方向"，不会变成规则流动。
         let blobs: [Blob] = [
-            Blob(baseX: 0.15, baseY: 0.50, ampX: 0.20, ampY: 0.34, angle: 0.00, period: 12.7, radius: 1.55, hue: 0.64),
-            Blob(baseX: 0.38, baseY: 0.42, ampX: 0.24, ampY: 0.40, angle: 1.15, period:  9.3, radius: 1.30, hue: 0.76),
-            Blob(baseX: 0.60, baseY: 0.58, ampX: 0.19, ampY: 0.36, angle: 2.40, period: 15.1, radius: 1.70, hue: 0.56),
-            Blob(baseX: 0.80, baseY: 0.48, ampX: 0.23, ampY: 0.42, angle: 3.60, period: 11.9, radius: 1.40, hue: 0.70),
-            Blob(baseX: 0.28, baseY: 0.55, ampX: 0.28, ampY: 0.30, angle: 5.10, period: 13.7, radius: 1.60, hue: 0.50),
-            Blob(baseX: 0.70, baseY: 0.45, ampX: 0.21, ampY: 0.38, angle: 4.30, period: 10.3, radius: 1.45, hue: 0.82),
+            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.34, angle: 0.00, period: 12.7, radius: 1.75, hue: 0.64),
+            Blob(baseX: 0.22, baseY: 0.44, ampX: 0.06, ampY: 0.40, angle: 1.15, period:  9.3, radius: 1.60, hue: 0.76),
+            Blob(baseX: 0.40, baseY: 0.56, ampX: 0.05, ampY: 0.36, angle: 2.40, period: 15.1, radius: 1.85, hue: 0.56),
+            Blob(baseX: 0.58, baseY: 0.47, ampX: 0.06, ampY: 0.42, angle: 3.60, period: 11.9, radius: 1.70, hue: 0.70),
+            Blob(baseX: 0.76, baseY: 0.53, ampX: 0.05, ampY: 0.30, angle: 5.10, period: 13.7, radius: 1.80, hue: 0.50),
+            Blob(baseX: 0.94, baseY: 0.46, ampX: 0.05, ampY: 0.38, angle: 4.30, period: 10.3, radius: 1.65, hue: 0.82),
         ]
 
         for blob in blobs {
@@ -236,14 +244,15 @@ enum MenuBarImage {
             // 径向渐变：中心最浓 → 中段渐隐 → 边缘完全透明，就是"柔和的光斑"。
             // 三段是为了让衰减接近高斯，只有两段会看出生硬的边界。
             //
-            // ⚠️ alpha 与 saturation 都**刻意压低**（0.32 / 0.70）。第一版用的是
-            // 0.50 / 0.92，实测文字压在饱和品红上明显发闷、对比度不足，而且几个光斑
-            // 一叠就接近实色，完全不是"漫散"的观感。
-            // 现在中心只贡献约 0.32 的不透明度，又因为两个光斑重叠时是"横向补光"
-            // （同一层内 source-over 叠加，不会像加色那样迅速烧白），最多也就是 0.5 上下。
+            // 浓度值是**按实测对齐流光调的**（流光整体 alpha 均值 0.506，10 段均匀分布在
+            // 0.39~0.57）。第一版一味压低，结果整体只有 0.256~0.299 —— 只有流光的一半，
+            // 用户的原话是"这么淡，看不见啊"。
+            // 现在中心 0.58、中段 0.30，相邻光斑重叠后整体落在 0.45~0.55，与流光同级。
+            // `saturation` 取 0.70（流光是 >1 的过饱和）：漫散射的重叠更密，
+            // 饱和度再高就会互相叠成实色、失去"漫散"的观感。
             let stops: [(CGFloat, CGFloat)] = [
-                (0.00, 0.32),
-                (0.45, 0.16),
+                (0.00, 0.58),
+                (0.45, 0.30),
                 (1.00, 0.00)
             ]
             let colors = stops.map { NSColor(hue: hue, saturation: 0.70, brightness: 1.0, alpha: $0.1) }
