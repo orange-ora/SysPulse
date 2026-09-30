@@ -100,7 +100,7 @@ struct DashboardView: View {
                 // `CPU … GPU … MEM …` 的顺序一致（2026-09-16 按需求把这两项调了个位置）。
                 toggleChip("GPU", isOn: preferences.showGPU) { preferences.showGPU.toggle() }
                 toggleChip("内存", isOn: preferences.showMemory) { preferences.showMemory.toggle() }
-                toggleChip("流光", isOn: preferences.menuBarGlow) { preferences.menuBarGlow.toggle() }
+                effectChip()
             }
             .padding(.top, 5)   // 标题行 7pt + 这里 5pt = 12pt，比卡片内「标题 / 进度条」再松一点
         }
@@ -143,6 +143,55 @@ struct DashboardView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+    }
+
+    /// 背景动效选择：一个和 `toggleChip` 同尺寸的胶囊，点开是「关闭 / 流光 / 漫散射」三选一。
+    ///
+    /// **为什么不是又一个开关**：两个效果是互斥的（同时开会互相干扰、观感更乱），
+    /// 做成两个独立开关就会出现"两个都亮着"的歧义状态；做成单值枚举就不会。
+    ///
+    /// 未选中（关闭）时用 `eye.slash` 而不是 `checkmark`，因为这一项和左边四个
+    /// "开/关"型开关语义不同 —— 它是三态，用眼睛图标一眼能看出"当前没有背景动效"。
+    private func effectChip() -> some View {
+        let effect = preferences.menuBarEffect
+        let isOn = effect != .off
+        return Menu {
+            ForEach(MenuBarEffect.allCases, id: \.self) { option in
+                Button {
+                    preferences.menuBarEffect = option
+                } label: {
+                    menuRow(option.title, isOn: option == effect)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isOn ? "sparkles" : "eye.slash")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(isOn ? Color.green : Color.clear)
+                    .frame(width: 9, height: 9)
+                Text(effect.title)
+                    .font(.system(size: 10.5, weight: isOn ? .medium : .regular))
+            }
+            .foregroundStyle(isOn ? Color.primary : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .background(
+                Capsule().fill(isOn ? Color.green.opacity(0.16) : Color.primary.opacity(0.06))
+            )
+            .overlay(
+                Capsule().stroke(
+                    isOn ? Color.green.opacity(0.30) : Color.primary.opacity(0.10),
+                    lineWidth: 0.5
+                )
+            )
+            .contentShape(Capsule())
+        }
+        // `.borderlessButton` 会忽略 `.foregroundStyle`（标签由系统按菜单样式渲染），
+        // 于是关闭态下会和左边四个开关的"灰"不一致 —— 所以只靠文字/图标本身表达状态，
+        // 颜色交给系统，这样在浅色面板上也不会发灰。
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 
     /// 菜单项：选中时在文字前加一个**绿色**勾。

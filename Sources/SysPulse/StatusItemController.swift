@@ -52,7 +52,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var measuredDensityIndex: Int?
     /// 各档位实测过的最大图片宽度，用来判断"升档是否放得下"
     private var densityWidths: [CGFloat] = [0, 0, 0]
-    /// 流光效果的重画帧率。
+    /// 菜单栏**背景动效**（流光 / 漫散射）的重画帧率。
     ///
     /// ⚠️ **改这一个常量即可**：定时器间隔与每帧相位步进都从它派生，不要再各写一遍
     /// 字面量（否则会出现"帧率改了但动画速度也跟着变"的隐性耦合）。
@@ -71,13 +71,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 注意：15fps 时每帧位移就已经高于 1 个灰阶了，所以这个流光从来不是靠"单帧不可辨"
     /// 取胜，而是靠**变化在时间上等步连续**。台阶到 8fps 会翻倍，那才是风险区。
     /// 10fps 是"台阶仍在 1 灰阶量级"与省电之间的拐点，故取此值（2026-09-30 选定）。
-    private let glowFramesPerSecond: Double = 10
-    /// 流光相位走完一整圈所需秒数（周期）。相位步进 = 1 /（帧率 × 这个值）。
-    private let glowCycleSeconds: Double = 12
-    /// 流光效果的定时器与当前相位（0…1）
-    private var glowTimer: Timer?
-    private var glowPhase: Double = 0
-    /// 屏幕不可见（休眠 / 锁屏 / 屏保）时挂起流光。挂起 != 关闭：
+    private let effectFramesPerSecond: Double = 10
+    /// 相位走完一整圈所需秒数（周期）。相位步进 = 1 /（帧率 × 这个值）。
+    ///
+    /// 两个效果共用这一个时钟，所以切换效果时不会"跳一下"。**具体动多快由各效果自己决定**：
+    /// `drawGlow` 把 phase 乘上 `turns = 2.5` 横向推 2.5 个波长，`drawDiffuse` 则把
+    /// phase 当 0…1 的环绕量、按每个光斑自己的周期（9~15 秒）换算 —— 所以同一个相位步进，
+    /// 两个效果的观感速度并不相同，调快慢时以实际观感为准。
+    private let effectCycleSeconds: Double = 12
+    /// 背景动效的定时器与当前相位（0…1，两个效果共用同一个时钟）
+    private var effectTimer: Timer?
+    private var effectPhase: Double = 0
+    /// 屏幕不可见（休眠 / 锁屏 / 屏保）时挂起动效。挂起 != 关闭：
     /// 回来之后若用户开关仍为开，要自动续上。
     ///
     /// ⚠️ **必须按来源分别记账，不能用一个 Bool。** 这几个条件会**重叠**：
@@ -85,9 +90,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 用单个 Bool 的话，那次恢复把标志清成 false 就以为没事了，可屏还锁着；
     /// 反过来（先休眠再锁屏、只来一条恢复）会永远卡在挂起。两种方向都错。
     /// 所以记成集合：**空了才算真的恢复**。
-    private var glowSuspendReasons: Set<String> = []
+    private var effectSuspendReasons: Set<String> = []
     /// 挂在 `NSWorkspace` / `DistributedNotificationCenter` 上的观察者，deinit 时要摘掉
-    private var glowObservers: [NSObjectProtocol] = []
+    private var effectObservers: [NSObjectProtocol] = []
     /// 最近几次采样到的状态栏项左边缘位置。
     ///
     /// 为什么需要它：系统在菜单栏拥挤时会把状态项**挪到极左的折叠区**，此时读到的
@@ -180,24 +185,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
         monitor.start()
 
-        // 流光效果：只在开启时跑一个 `glowFramesPerSecond` 帧率的轻量定时器。
-        // 注意它**只重画那一层渐变**（`MenuBarImage.drawGlow`），文字的排版与绘制仍然
-        // 只跟着数据刷新走；关掉开关就立刻停表，不留常驻开销。
-        preferences.$menuBarGlow
+        // 背景动效（流光 / 漫散射）：只在选中某一效果时跑一个 `effectFramesPerSecond`
+        // 帧率的轻量定时器。注意它**只重画背景那一层**（`MenuBarImage.drawEffect`），
+        // 文字的排版与绘制仍然只跟着数据刷新走；关掉就立刻停表，不留常驻开销。
+        preferences.$menuBarEffect
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                self?.applyGlowState(redrawIfStopped: true)
+                self?.applyEffectState(redrawIfStopped: true)
             }
             .store(in: &cancellables)
-        observeGlowSuspendConditions()
-        applyGlowState(redrawIfStopped: false)
+        observeEffectSuspendConditions()
+        applyEffectState(redrawIfStopped: false)
     }
 
-    // MARK: - 流光
+    // MARK: - 背景动效
 
     /// 屏幕看不见的时候别烧 CPU。
     ///
-    /// 流光空闲占用本来就不便宜（帧率 15 时实测约 **14.8% CPU**），而显示器休眠、锁屏、
+    /// 动效空闲占用本来就不便宜（流光在帧率 15 时实测约 **14.8% CPU**），而显示器休眠、锁屏、
     /// 屏保这三种状态下**根本没人看得到菜单栏**，那部分算力是纯浪费 —— 在笔记本上直接
     /// 变成续航。所以这些条件里任意一个成立就停表，全都解除后自动续上。
     ///
@@ -206,23 +211,23 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 少听一条就会出现"锁着屏还在 10fps 重画"。
     /// （实测 2026-09-30：挂起生效时 CPU 9.40% → 0.80%，恢复后 → 10.15%，可逆。
     ///  验证时是**合成投递** `com.apple.screensaver.didstart/didstop` 触发的。）
-    private func observeGlowSuspendConditions() {
+    private func observeEffectSuspendConditions() {
         let workspace = NSWorkspace.shared.notificationCenter
         let distribute = DistributedNotificationCenter.default()
 
-        // 每个来源用独立的 key 记账，互不覆盖（重叠场景见 glowSuspendReasons 注释）
+        // 每个来源用独立的 key 记账，互不覆盖（重叠场景见 effectSuspendReasons 注释）
         func watch(_ center: NotificationCenter, _ name: Notification.Name, key: String) {
-            glowObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            effectObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
-                self.glowSuspendReasons.insert(key)
-                self.applyGlowState(redrawIfStopped: false)
+                self.effectSuspendReasons.insert(key)
+                self.applyEffectState(redrawIfStopped: false)
             })
         }
         func watchResume(_ center: NotificationCenter, _ name: Notification.Name, key: String) {
-            glowObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            effectObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
-                self.glowSuspendReasons.remove(key)
-                self.applyGlowState(redrawIfStopped: true)
+                self.effectSuspendReasons.remove(key)
+                self.applyEffectState(redrawIfStopped: true)
             })
         }
 
@@ -240,47 +245,47 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         watchResume(distribute, Notification.Name("com.apple.screenIsUnlocked"), key: "lock")
     }
 
-    /// 按「用户开关」× 「屏幕可见性」两个条件决定流光该不该跑。
+    /// 按「效果选择」× 「屏幕可见性」两个条件决定动效该不该跑。
     ///
     /// - Parameter redrawIfStopped: 停下来之后要不要立刻按当前相位补画一次。
-    ///   用户手动关流光时需要（要立刻擦掉流光，见原逻辑）；睡眠/锁屏时不需要。
-    private func applyGlowState(redrawIfStopped: Bool) {
-        if preferences.menuBarGlow, glowSuspendReasons.isEmpty {
-            startGlowTimer()
+    ///   用户手动切成「关闭」时需要（要立刻擦掉背景，见原逻辑）；睡眠/锁屏时不需要。
+    private func applyEffectState(redrawIfStopped: Bool) {
+        if preferences.menuBarEffect != .off, effectSuspendReasons.isEmpty {
+            startEffectTimer()
         } else {
-            let wasRunning = glowTimer != nil
-            stopGlowTimer()
+            let wasRunning = effectTimer != nil
+            stopEffectTimer()
             if redrawIfStopped, wasRunning {
                 updateStatusItem(with: monitor.snapshot)
             }
         }
     }
 
-    private func startGlowTimer() {
-        guard glowTimer == nil else { return }
-        let interval = 1.0 / glowFramesPerSecond
+    private func startEffectTimer() {
+        guard effectTimer == nil else { return }
+        let interval = 1.0 / effectFramesPerSecond
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let step = 1.0 / (self.glowFramesPerSecond * self.glowCycleSeconds)
-            self.glowPhase = (self.glowPhase + step).truncatingRemainder(dividingBy: 1)
+            let step = 1.0 / (self.effectFramesPerSecond * self.effectCycleSeconds)
+            self.effectPhase = (self.effectPhase + step).truncatingRemainder(dividingBy: 1)
             self.updateStatusItem(with: self.monitor.snapshot, allowLayoutChange: false)
         }
         timer.tolerance = interval * 0.1
         RunLoop.main.add(timer, forMode: .common)
-        glowTimer = timer
+        effectTimer = timer
     }
 
-    private func stopGlowTimer() {
-        glowTimer?.invalidate()
-        glowTimer = nil
-        glowPhase = 0
+    private func stopEffectTimer() {
+        effectTimer?.invalidate()
+        effectTimer = nil
+        effectPhase = 0
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
         let workspace = NSWorkspace.shared.notificationCenter
         let distribute = DistributedNotificationCenter.default()
-        for observer in glowObservers {
+        for observer in effectObservers {
             workspace.removeObserver(observer)
             distribute.removeObserver(observer)
         }
@@ -392,7 +397,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     ///   宽度变化时算出的锚点中心（旧 x + 新宽度/2）是**错的**。旧代码拿"frame 变了"当判据，
     ///   于是在第一段就动手，面板被摆到错误位置（用户看到的"反向跳一下"），x 就位后再跳回来。
     ///   **把代码里所有 `show` 关掉的对照实验证明：系统自己从不移动面板**，那一下就是抢跑。
-    /// - 这个检查每次重绘都会跑（含流光的每一帧），没变化时只是一次数值比较，开销可忽略。
+    /// - 这个检查每次重绘都会跑（含动效的每一帧），没变化时只是一次数值比较，开销可忽略。
     ///   因为只在 x 变化时才动手，而 x 的**最后一次**变化必然就是排版完成，所以一次到位、
     ///   不需要去抖、预测或事后校正。
     /// - 唯一例外：w 与 x 是系统的两个属性、两次更新，极快连点（间隔 <20ms）时本拍可能读到
@@ -506,7 +511,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // MARK: - 状态栏
 
     /// - Parameter allowLayoutChange: 是否允许在本次调用里重新决定排版档位。
-    ///   流光的定时器每帧都会调用这里，**必须传 false**——否则升降档会以 15Hz 反复触发，
+    ///   动效的定时器每帧都会调用这里，**必须传 false**——否则升降档会以帧率（10Hz）反复触发，
     ///   测量值还没稳定就被下一次决策推翻，档位就会 full↔compact↔minimal 无限横跳。
     private func updateStatusItem(with snapshot: MetricsSnapshot, allowLayoutChange: Bool = true) {
         guard let button = statusItem.button else { return }
@@ -517,9 +522,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // `let index = currentDensityIndex` 才是**本次真正渲染**的档位。
         // 旧写法把它放在渲染之后，等于「这一拍做决策、下一拍才画出来」——
         // 而"下一拍"是什么取决于谁还会再调一次这里：
-        //   · 流光开着 → 下一帧，约 100ms 后（`glowFramesPerSecond` = 10；DEVLOG 实测
+        //   · 动效开着 → 下一帧，约 100ms 后（`effectFramesPerSecond` = 10；DEVLOG 实测
         //     "决策 2.02s → 画出 2.08s"就是它，当时帧率更高所以间隔更短）
-        //   · **流光关着（默认值）→ 只剩数据刷新定时器，要再等一整个刷新周期**
+        //   · **动效关着（默认值）→ 只剩数据刷新定时器，要再等一整个刷新周期**
         //     2 秒刷新时就是白等 2 秒，加上判定本身需要的 2 拍，体感远不止文档记的 2.08 秒。
         //
         // 顺带解决第二个问题：这里读的是 `window.frame`。放在设 `button.image` **之前**读到的
@@ -530,7 +535,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 不依赖 `image`，也不依赖 `button.image` 是否已经设置。
         //
         // 只有"数据真的刷新了"这一次才允许重算排版档位。
-        // 流光的定时器每帧也会调用这里（allowLayoutChange: false）——如果让它也触发
+        // 动效的定时器每帧也会调用这里（allowLayoutChange: false）——如果让它也触发
         // 升降档判定，就会以 15Hz 反复决策：测量值还没稳定就被下一次推翻，档位在
         // full↔compact↔minimal 之间无限横跳（实测每秒一轮，菜单栏看起来像在"转"）。
         if allowLayoutChange {
@@ -546,7 +551,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             preferences: preferences,
             appearance: appearance,
             density: densityOrder[index],
-            glowPhase: preferences.menuBarGlow ? glowPhase : nil
+            effect: preferences.menuBarEffect,
+            effectPhase: preferences.menuBarEffect != .off ? effectPhase : nil
         )
         // 宽度记账（升档判据靠它算"更宽那档要多占多少"）：
         // ⚠️ 数据还没到位那一次渲染里 GPU 段会**整段缺失**，量出来的宽度偏小
@@ -584,7 +590,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         button.toolTip = MenuBarImage.tooltip(snapshot: snapshot)
 
         // ⚠️ 档位判定已经在函数**开头**跑过了（原因见那里的长注释：放在渲染之后会白等一拍，
-        // 流光关着时那一拍 = 一整个刷新周期）。这里**不要**再调用一次 `adaptToAvailableSpace()`。
+        // 动效关着时那一拍 = 一整个刷新周期）。这里**不要**再调用一次 `adaptToAvailableSpace()`。
 
         // 图标宽度/位置可能变了（切显示项、换排版档位、**启动时自动升档**）：
         // 只要当前锚点和上次对齐用的不一致，就把面板重新锚定一次。
@@ -617,7 +623,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 系统却拿旧 x 算中心，于是**先向左跳**。
     ///
     /// 而只等 x 变化的旧逻辑要等到"看见 x 变化之后的下一拍重绘"才纠正：实测晚了
-    /// **52ms**（当时流光帧 15fps 的粒度；**流光关掉时更是要等下一次数据刷新，最长 1 秒**），
+    /// **52ms**（当时动效帧 15fps 的粒度；**动效关掉时更是要等下一次数据刷新，最长 1 秒**），
     /// 那 45pt 的错误位置就被真真切切画出来了 —— 这就是用户看到的"反向跳一下"。
     ///
     /// 另一个方向（图标增加、窗口变宽）系统**根本不挪面板**（实测两次都没挪），

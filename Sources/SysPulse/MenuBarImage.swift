@@ -62,7 +62,8 @@ enum MenuBarImage {
         preferences: Preferences,
         appearance: NSAppearance?,
         density: MenuBarDensity,
-        glowPhase: Double? = nil
+        effect: MenuBarEffect = .off,
+        effectPhase: Double? = nil
     ) -> NSImage? {
         let rows = buildRows(snapshot: snapshot, preferences: preferences, density: density)
         guard !rows.isEmpty else {
@@ -140,17 +141,119 @@ enum MenuBarImage {
         let image = NSImage(size: size, flipped: false) { _ in
             if let appearance {
                 appearance.performAsCurrentDrawingAppearance {
-                    drawGlow(size: size, phase: glowPhase)
+                    drawEffect(size: size, effect: effect, phase: effectPhase)
                     draw()
                 }
             } else {
-                drawGlow(size: size, phase: glowPhase)
+                drawEffect(size: size, effect: effect, phase: effectPhase)
                 draw()
             }
             return true
         }
         image.isTemplate = false
         return image
+    }
+
+    /// 背景动效总入口，按给定效果分发。
+    ///
+    /// `phase` 为 nil = 不画（关闭，或这一帧不需要动效层）。两个效果共用同一个相位时钟
+    /// （`StatusItemController` 的定时器），所以切换效果时不会出现"跳动一下"。
+    ///
+    /// ⚠️ **效果类型必须从参数传进来，不能读 `Preferences.shared`。**
+    /// 一开始这里读的是全局单例，结果是：① 渲染函数不再可测（测试进程有自己的
+    /// bundle id，读到的是它自己的默认值 `.off`，于是怎么渲都只有文字层）；
+    /// ② 与同函数的 `density`（从参数传）不对称，埋一个"到底该信谁"的坑。
+    static func drawEffect(size: NSSize, effect: MenuBarEffect, phase: Double?) {
+        guard let phase else { return }
+        switch effect {
+        case .off: return
+        case .glow: drawGlow(size: size, phase: phase)
+        case .diffuse: drawDiffuse(size: size, phase: phase)
+        }
+    }
+
+    /// 漫散射层：几个柔和的径向光斑**各自沿不同方向、以不同速度游走**，互相叠加。
+    ///
+    /// 和 `drawGlow` 的本质区别：流光只有一个相位、色带整体横向平移，所以是**规则的**；
+    /// 这里每个光斑有自己的方向角、周期、半径、色相，叠加之后没有可预测的走向 ——
+    /// 就是需求里要的"不拘于方向、像水汽漫散"。
+    ///
+    /// ⚠️ **周期刻意取互不相同且互不整除的值**（12.7 / 9.3 / 15.1 / 11.9 / 13.7 / 10.3 秒）。
+    /// 如果取成相同的周期，所有光斑会一起回到起点，整条每隔一个周期就"重来一次"，
+    /// 规律感立刻回来 —— 那正是要避免的。
+    ///
+    /// 实现成本：每个光斑**一次** `NSGradient.draw`（径向），6 个光斑 = 6 次填充。
+    /// 对比 `drawGlow` 的 1 次横向渐变 + `drawRipple` 的 1 次，同量级。
+    /// 注意整条动效的真实开销不在绘制（实测 0.13ms/帧），而在"每帧换一张状态栏图片"
+    /// 那笔系统开销 —— 见 `contentKey` 的注释。
+    static func drawDiffuse(size: NSSize, phase: Double) {
+        let rect = NSRect(origin: .zero, size: size)
+        // 裁到圆角胶囊里：光斑半径（1.3~1.7 倍条高）故意比条大，中心也游走出条外，
+        // 不裁的话圆形渐变的直角边缘会在胶囊圆角处露出来。
+        // 实测这个 `saveGraphicsState` + `addClip` 的开销可忽略（裁剪路径本身很便宜，
+        // 真正的成本在"每帧换一张状态栏图片"那笔系统开销上）。
+        let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: size.height / 2, yRadius: size.height / 2)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+
+        struct Blob {
+            /// 基准位置（相对条宽 / 条高的比例）
+            let baseX: CGFloat, baseY: CGFloat
+            /// 游走半径（相对条宽 / 条高的比例）
+            let ampX: CGFloat, ampY: CGFloat
+            /// 方向相位（弧度）：决定它往哪个方向偏，各个不同
+            let angle: CGFloat
+            /// 走完一圈的秒数。**各不相等**是"不规律"的关键
+            let period: Double
+            /// 光斑半径（相对条高），1 以上意味着比条还高、更柔
+            let radius: CGFloat
+            /// 基准色
+            let hue: CGFloat
+        }
+
+        let blobs: [Blob] = [
+            Blob(baseX: 0.15, baseY: 0.50, ampX: 0.20, ampY: 0.34, angle: 0.00, period: 12.7, radius: 1.55, hue: 0.64),
+            Blob(baseX: 0.38, baseY: 0.42, ampX: 0.24, ampY: 0.40, angle: 1.15, period:  9.3, radius: 1.30, hue: 0.76),
+            Blob(baseX: 0.60, baseY: 0.58, ampX: 0.19, ampY: 0.36, angle: 2.40, period: 15.1, radius: 1.70, hue: 0.56),
+            Blob(baseX: 0.80, baseY: 0.48, ampX: 0.23, ampY: 0.42, angle: 3.60, period: 11.9, radius: 1.40, hue: 0.70),
+            Blob(baseX: 0.28, baseY: 0.55, ampX: 0.28, ampY: 0.30, angle: 5.10, period: 13.7, radius: 1.60, hue: 0.50),
+            Blob(baseX: 0.70, baseY: 0.45, ampX: 0.21, ampY: 0.38, angle: 4.30, period: 10.3, radius: 1.45, hue: 0.82),
+        ]
+
+        for blob in blobs {
+            let theta = 2 * .pi * CGFloat(phase) + blob.angle
+            let cx = (blob.baseX + cos(theta) * blob.ampX) * size.width
+            let cy = (blob.baseY + sin(theta * 1.31) * blob.ampY) * size.height
+
+            // 色相也在**缓慢**飘移 → 同一个光斑不会一直是一个颜色。
+            // ⚠️ 系数原来写的 0.5，实测太快：4 秒内就从紫扫到黄绿，观感是"彩虹机"而不是
+            // 漫散。0.22 约等于 24 秒一个大色轮，和光斑游走的周期同量级。
+            var hue = (blob.hue + CGFloat(phase) * 0.22).truncatingRemainder(dividingBy: 1)
+            if hue < 0 { hue += 1 }
+
+            let radius = blob.radius * size.height
+            // 径向渐变：中心最浓 → 中段渐隐 → 边缘完全透明，就是"柔和的光斑"。
+            // 三段是为了让衰减接近高斯，只有两段会看出生硬的边界。
+            //
+            // ⚠️ alpha 与 saturation 都**刻意压低**（0.32 / 0.70）。第一版用的是
+            // 0.50 / 0.92，实测文字压在饱和品红上明显发闷、对比度不足，而且几个光斑
+            // 一叠就接近实色，完全不是"漫散"的观感。
+            // 现在中心只贡献约 0.32 的不透明度，又因为两个光斑重叠时是"横向补光"
+            // （同一层内 source-over 叠加，不会像加色那样迅速烧白），最多也就是 0.5 上下。
+            let stops: [(CGFloat, CGFloat)] = [
+                (0.00, 0.32),
+                (0.45, 0.16),
+                (1.00, 0.00)
+            ]
+            let colors = stops.map { NSColor(hue: hue, saturation: 0.70, brightness: 1.0, alpha: $0.1) }
+            let locations = stops.map { $0.0 }
+            let center = NSPoint(x: cx, y: cy)
+            NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
+                .draw(fromCenter: center, radius: 0, toCenter: center, radius: radius, options: [])
+        }
+
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     /// 流光层：**整条背景**都在流动的彩色渐变，铺在指标文字底下。
