@@ -208,8 +208,10 @@ enum MenuBarImage {
             let period: Double
             /// 光斑半径（相对条高），1 以上意味着比条还高、更柔
             let radius: CGFloat
-            /// 基准色
+            /// 基准色相
             let hue: CGFloat
+            /// 色相呼吸方向（+1 / -1）。相邻取相反值，让色相关系保持稳定，见 blobs 的注释
+            let hueDrift: CGFloat
         }
 
         // ⚠️ **基准位置按等距铺满整条**（0.06 / 0.22 / 0.40 / 0.58 / 0.76 / 0.94）。
@@ -220,13 +222,25 @@ enum MenuBarImage {
         // 等距铺开之后，无论各光斑怎么游走，整条都始终有覆盖，只有**浓度**在起伏。
         //
         // 每段的游走方向仍各不相同（`angle`），所以观感依然"不拘方向"，不会变成规则流动。
+        // ⚠️ **色相是一段"窄而缓"的坡**（0.58 → 0.74，跨约 58°），**不是整条色轮**。
+        //
+        // 第一版取 0.50(青) → 0.82(粉红)，跨 115°，用户反馈"颜色配比不好看、有点突兀、
+        // 东一块西一块、融合感不够"。量化后确实：相邻取样点的**色相跳变均值 14.4~16.4°、
+        // 峰值到 51°**，而流光只有 5.6~9.6° / 峰值 27.8° —— 差近一倍。
+        // 现在把坡收窄到蓝紫→紫红，跳变向流光看齐。
+        //
+        // 另外每个光斑的 `hue` 都配了一个 `hueDrift`：**围绕自己的本色小幅呼吸**
+        // （±0.06，约 ±22°），而且相位两两相反 ——
+        // 相邻光斑反向漂移时，两者之间的色相**差**基本守恒，所以"谁是蓝、谁是紫"的关系
+        // 保持稳定，只有整体在轻轻游移。第一版是所有光斑各自漂 ±0.22（±79°）且相位相同，
+        // 于是相邻区域会各自跑到不相关的地方（紫旁边突然变青或粉）—— 这正是"突兀"的来源。
         let blobs: [Blob] = [
-            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.34, angle: 0.00, period: 12.7, radius: 1.75, hue: 0.64),
-            Blob(baseX: 0.22, baseY: 0.44, ampX: 0.06, ampY: 0.40, angle: 1.15, period:  9.3, radius: 1.60, hue: 0.76),
-            Blob(baseX: 0.40, baseY: 0.56, ampX: 0.05, ampY: 0.36, angle: 2.40, period: 15.1, radius: 1.85, hue: 0.56),
-            Blob(baseX: 0.58, baseY: 0.47, ampX: 0.06, ampY: 0.42, angle: 3.60, period: 11.9, radius: 1.70, hue: 0.70),
-            Blob(baseX: 0.76, baseY: 0.53, ampX: 0.05, ampY: 0.30, angle: 5.10, period: 13.7, radius: 1.80, hue: 0.50),
-            Blob(baseX: 0.94, baseY: 0.46, ampX: 0.05, ampY: 0.38, angle: 4.30, period: 10.3, radius: 1.65, hue: 0.82),
+            Blob(baseX: 0.06, baseY: 0.50, ampX: 0.05, ampY: 0.32, angle: 0.00, period: 12.7, radius: 1.95, hue: 0.58, hueDrift:  1),
+            Blob(baseX: 0.22, baseY: 0.46, ampX: 0.06, ampY: 0.36, angle: 1.15, period:  9.3, radius: 1.85, hue: 0.62, hueDrift: -1),
+            Blob(baseX: 0.40, baseY: 0.54, ampX: 0.05, ampY: 0.34, angle: 2.40, period: 15.1, radius: 2.00, hue: 0.66, hueDrift:  1),
+            Blob(baseX: 0.58, baseY: 0.48, ampX: 0.06, ampY: 0.38, angle: 3.60, period: 11.9, radius: 1.90, hue: 0.70, hueDrift: -1),
+            Blob(baseX: 0.76, baseY: 0.52, ampX: 0.05, ampY: 0.32, angle: 5.10, period: 13.7, radius: 1.95, hue: 0.72, hueDrift:  1),
+            Blob(baseX: 0.94, baseY: 0.47, ampX: 0.05, ampY: 0.36, angle: 4.30, period: 10.3, radius: 1.85, hue: 0.74, hueDrift: -1),
         ]
 
         for blob in blobs {
@@ -234,10 +248,12 @@ enum MenuBarImage {
             let cx = (blob.baseX + cos(theta) * blob.ampX) * size.width
             let cy = (blob.baseY + sin(theta * 1.31) * blob.ampY) * size.height
 
-            // 色相也在**缓慢**飘移 → 同一个光斑不会一直是一个颜色。
-            // ⚠️ 系数原来写的 0.5，实测太快：4 秒内就从紫扫到黄绿，观感是"彩虹机"而不是
-            // 漫散。0.22 约等于 24 秒一个大色轮，和光斑游走的周期同量级。
-            var hue = (blob.hue + CGFloat(phase) * 0.22).truncatingRemainder(dividingBy: 1)
+            // 色相围绕本色小幅呼吸（±0.06 ≈ ±22°），相位两两相反。
+            // ⚠️ 别再改回"所有光斑同向漂移"：那样相邻区域的色相关系会不断重新组合，
+            // 观感就是"东一块西一块"。这里反向呼吸能保住"谁是蓝、谁是紫"的稳定关系。
+            let hueDriftAmount: CGFloat = 0.06
+            var hue = blob.hue + blob.hueDrift * hueDriftAmount * cos(2 * .pi * CGFloat(phase))
+            hue = hue.truncatingRemainder(dividingBy: 1)
             if hue < 0 { hue += 1 }
 
             let radius = blob.radius * size.height
@@ -255,7 +271,7 @@ enum MenuBarImage {
                 (0.45, 0.30),
                 (1.00, 0.00)
             ]
-            let colors = stops.map { NSColor(hue: hue, saturation: 0.70, brightness: 1.0, alpha: $0.1) }
+            let colors = stops.map { NSColor(hue: hue, saturation: 0.55, brightness: 1.0, alpha: $0.1) }
             let locations = stops.map { $0.0 }
             let center = NSPoint(x: cx, y: cy)
             NSGradient(colors: colors, atLocations: locations, colorSpace: .deviceRGB)?
