@@ -318,11 +318,20 @@ enum MenuBarImage {
             let cx = (blob.baseX + cos(theta) * blob.ampX) * size.width
             let cy = (blob.baseY + sin(theta * 1.31) * blob.ampY) * size.height
 
-            // 色相围绕本色小幅呼吸（±0.06 ≈ ±22°），相位两两相反。
-            // ⚠️ 别再改回"所有光斑同向漂移"：那样相邻区域的色相关系会不断重新组合，
-            // 观感就是"东一块西一块"。这里反向呼吸能保住"谁是蓝、谁是紫"的稳定关系。
-            let hueDriftAmount: CGFloat = 0.06
-            var hue = blob.hue + blob.hueDrift * hueDriftAmount * cos(2 * .pi * CGFloat(phase))
+            // 色相：**整条一起缓慢游走**（所有光斑同向），而不是各自反向呼吸。
+            //
+            // ⚠️ 这里换过两种做法，都踩了坑，记下来：
+            // ① 最初是各自漂 ±0.22 且同向 → 相邻区域色相差不停重组 → "东一块西一块"；
+            // ② 改成**相邻反相**的小幅呼吸（±0.06）→ 融合感好了，但反相会互相抵消，
+            //    整条的平均色相只摆 ±7°；
+            // ③ 把幅度加到 ±0.12 仍是 ±10° —— 证实抵消是主因，不是幅度不够。
+            // 现在是：**同向、慢速、围绕本色**游走。同向就不会抵消（整条平均色相跟着走），
+            // 慢速 + 围绕本色（±0.09 ≈ ±32°）则保住"相邻不会跳色"的融合感。
+            //
+            // 用户对观感的原话依次是"东一块西一块、融合感不够" → "固定颜色了，不会再变色"，
+            // 这两句正好定义了这里要的区间：**变化要看得见，但相邻不能跳色**。
+            let hueDriftAmount: CGFloat = count >= 8 ? 0.09 : 0.07
+            var hue = blob.hue + hueDriftAmount * CGFloat(sin(2 * .pi * CGFloat(phase)))
             hue = hue.truncatingRemainder(dividingBy: 1)
             if hue < 0 { hue += 1 }
 
