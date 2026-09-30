@@ -3,6 +3,7 @@ import SwiftUI
 
 /// 下拉面板：每项指标一张卡片，含实时数值、迷你曲线与进度条。
 struct DashboardView: View {
+
     @ObservedObject var monitor: SystemMonitor
     @ObservedObject var preferences: Preferences
     @ObservedObject private var login = LaunchAtLogin.shared
@@ -152,6 +153,89 @@ struct DashboardView: View {
     ///
     /// 未选中（关闭）时用 `eye.slash` 而不是 `checkmark`，因为这一项和左边四个
     /// "开/关"型开关语义不同 —— 它是三态，用眼睛图标一眼能看出"当前没有背景动效"。
+    ///
+    /// ⚠️ **这个胶囊的外观是一张整图，不是 SwiftUI 视图**（原因见 `effectChipImage`）。
+    /// 开启时是**橙色圆角圈 + 橙色星星 + 白字**；关闭时是灰圈 + 灰眼睛 + 灰字。
+    /// 左边四个开关的绿胶囊是另一套视图（`toggleChip`），**两者互不影响**。
+    ///
+    /// 把 SF Symbol 染成指定颜色，返回**非模板**图片（`isTemplate = false`）。
+    private static func tintedSymbol(_ name: String, color: NSColor, pointSize: CGFloat) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .bold)
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) else { return nil }
+        let out = NSImage(size: base.size)
+        out.lockFocus()
+        base.draw(in: NSRect(origin: .zero, size: base.size))
+        color.set()
+        NSRect(origin: .zero, size: base.size).fill(using: .sourceAtop)
+        out.unlockFocus()
+        out.isTemplate = false
+        return out
+    }
+
+    /// 把整个效果胶囊（圆角圈 + 星星 + 文字）画成**一张非模板图片**。
+    ///
+    /// ⚠️ **为什么必须整块画成图片**（2026-10-01 逐项实测，别往回改）：
+    /// 这个胶囊用 `.menuStyle(.borderlessButton)`，系统会把标签**扁平化**：
+    ///   · `.foregroundStyle(.green)` → 无效（图标/文字都被渲染成系统前景色）
+    ///   · `.background(Capsule().fill(Color…))` → **整块丢掉**
+    ///     （面板上量到 `(59,59,62)` 对底色 `(59,59,61)`，只有 1/255 的差别）
+    ///   · `.background(Image(nsImage: 非模板胶囊))` → 同样丢掉
+    ///   · 把胶囊放进内容做 ZStack 兄弟 → 画出来了，但**布局错乱**（胶囊与文字并排）
+    /// 唯一稳定的是**内容里的非模板图片按自身像素绘制**，所以整块画成一张图。
+    /// ⚠️ 用 `NSImage(size:flipped:drawingHandler:)` 而不是 `lockFocus`：
+    /// 前者按目标缩放**重新光栅化**，2x 屏上文字才清晰（与状态栏图片同一套做法）。
+    private static func effectChipImage(title: String, isOn: Bool, tint: NSColor,
+                                        isDark: Bool) -> NSImage {
+        let font = NSFont.systemFont(ofSize: 10.5, weight: isOn ? .semibold : .regular)
+        let iconSide: CGFloat = 11
+        let hPad: CGFloat = 8, vPad: CGFloat = 4, gap: CGFloat = 4
+        let attributed = NSAttributedString(string: title, attributes: [
+            .font: font,
+            // 文字按用户要求保持白字（浅色面板上转黑字）。
+            // ⚠️ 必须显式给色：`NSAttributedString.draw` 在离屏上下文里没有默认前景色，
+            // 不给就是**纯黑**（实测踩过：深色面板上文字直接消失）。
+            // ⚠️ 也不能用 `NSColor.labelColor` —— 离屏上下文的外观不跟随面板，
+            // 解析出来同样是黑的。所以外观由调用方按 `NSApp` 实际外观显式传进来。
+            .foregroundColor: isOn ? (isDark ? NSColor.white : NSColor.black)
+                                   : NSColor.secondaryLabelColor
+        ])
+        let textSize = attributed.size()
+        let size = NSSize(width: hPad * 2 + iconSide + gap + ceil(textSize.width),
+                          height: vPad * 2 + max(iconSide, ceil(textSize.height)))
+        let icon = tintedSymbol(isOn ? "sparkles" : "eye.slash",
+                                color: isOn ? tint : .clear, pointSize: 9)
+        let image = NSImage(size: size, flipped: false) { _ in
+            // 圆角圈：橙色描边 + 一层很淡的橙色底（与左边四个绿胶囊同一套做法，只换颜色）
+            let rect = NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
+            let path = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+            (isOn ? tint.withAlphaComponent(0.16) : NSColor.secondaryLabelColor.withAlphaComponent(0.10)).setFill()
+            path.fill()
+            (isOn ? tint.withAlphaComponent(0.75) : NSColor.secondaryLabelColor.withAlphaComponent(0.25)).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            if let icon {
+                icon.draw(at: NSPoint(x: hPad, y: (size.height - icon.size.height) / 2),
+                          from: .zero, operation: .sourceOver, fraction: 1)
+            }
+            attributed.draw(at: NSPoint(x: hPad + iconSide + gap,
+                                        y: (size.height - textSize.height) / 2))
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    /// 当前是不是深色外观。
+    ///
+    /// ⚠️ **不能用 SwiftUI 的 `@Environment(\.colorScheme)`** —— 实测它在面板这个
+    /// popover 里报 **light**（面板实际是深色），于是白字被画成黑字、压在深色面板上
+    /// 等于没字。也不能用 `NSColor.labelColor`：离屏绘制上下文的外观同样不跟随面板，
+    /// 解析出来也是黑的。直接问 App 的实际外观最可靠。
+    private static var isDarkAppearance: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
     private func effectChip() -> some View {
         let effect = preferences.menuBarEffect
         let isOn = effect != .off
@@ -164,27 +248,10 @@ struct DashboardView: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: isOn ? "sparkles" : "eye.slash")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(isOn ? Color.green : Color.clear)
-                    .frame(width: 9, height: 9)
-                Text(effect.title)
-                    .font(.system(size: 10.5, weight: isOn ? .medium : .regular))
-            }
-            .foregroundStyle(isOn ? Color.primary : Color.secondary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
-            .background(
-                Capsule().fill(isOn ? Color.green.opacity(0.16) : Color.primary.opacity(0.06))
-            )
-            .overlay(
-                Capsule().stroke(
-                    isOn ? Color.green.opacity(0.30) : Color.primary.opacity(0.10),
-                    lineWidth: 0.5
-                )
-            )
-            .contentShape(Capsule())
+            Image(nsImage: Self.effectChipImage(title: effect.title, isOn: isOn,
+                                                tint: .systemOrange,
+                                                isDark: Self.isDarkAppearance))
+                .accessibilityLabel(effect.title)
         }
         // `.borderlessButton` 会忽略 `.foregroundStyle`（标签由系统按菜单样式渲染），
         // 于是关闭态下会和左边四个开关的"灰"不一致 —— 所以只靠文字/图标本身表达状态，
