@@ -127,6 +127,26 @@ enum MenuBarImage {
             return width
         }
 
+        // ⚠️ **文字阴影：给"浅色动效底"准备的杠杆**（2026-10-01 启用）。
+        //
+        // 起因：用户要"浅粉色 + 浅蓝色"，而底色越浅、白字越糊
+        // （实测浅色底白字只有 2.2:1，流光那种中等明度底是 3.8:1）。
+        // 阴影把字形**紧邻的一圈压暗**，等于在字和底之间加一道过渡，
+        // 局部对比度上去了，白字就"拔"出来了 —— 而不用把整个动效压暗（那会丢掉"浅"）。
+        //
+        // 参数是量出来的：blur 越大会越糊（等于又制造一层灰），
+        // 所以用**几乎没有模糊的紧贴阴影**，只压暗紧邻的一圈。
+        let textShadowEnabled = true
+        let textShadow: NSShadow? = {
+            guard textShadowEnabled else { return nil }
+            let sh = NSShadow()
+            sh.shadowColor = NSColor.black.withAlphaComponent(0.45)
+            sh.shadowBlurRadius = 0.8
+            sh.shadowOffset = NSSize(width: 0, height: -0.6)
+            return sh
+        }()
+        _ = textShadow
+
         // 逐段排布：每段占「最宽形态」的宽度，实际文字画在段内固定起点
         var laidOut: [[(segment: Segment, x: CGFloat)]] = []
         var maxWidth: CGFloat = 0
@@ -153,10 +173,13 @@ enum MenuBarImage {
             for (rowIndex, items) in laidOut.enumerated() {
                 let offset = CGFloat(laidOut.count - 1 - rowIndex) * (lineHeight + 1)
                 for (segment, x) in items {
-                    NSAttributedString(string: segment.text, attributes: [
+                    var attributes: [NSAttributedString.Key: Any] = [
                         .font: font(segment.weight),
                         .foregroundColor: segment.color
-                    ]).draw(at: NSPoint(x: horizontalPadding + x, y: offset + spacing / 2))
+                    ]
+                    if let textShadow { attributes[.shadow] = textShadow }
+                    NSAttributedString(string: segment.text, attributes: attributes)
+                        .draw(at: NSPoint(x: horizontalPadding + x, y: offset + spacing / 2))
                 }
             }
         }
@@ -296,7 +319,7 @@ enum MenuBarImage {
         // 那张图是**亮底**，而菜单栏是深色底 + 白字，照搬会把文字涂掉，
         // 所以按用户决定保留暗底、只取它的色相走向。另外用户手上只有**静态截图**，
         // 所以参考只覆盖配色与色相分布，**动感从未被参考到**。
-        let hueStart: CGFloat = 0.889, hueEnd: CGFloat = 0.986
+        let hueStart: CGFloat = 0.944, hueEnd: CGFloat = 0.556
 
         // ⚠️ **脉动 = 每个光点自己的周期 + 各自的固定相位，然后减均值、再限幅。**
         //
@@ -373,7 +396,7 @@ enum MenuBarImage {
             // 全程最小 alpha 0.00 → 0.49，相邻色相跳变峰值 53.8° → 24°。
             let stops: [(CGFloat, CGFloat)] = [(0.00, 1.000), (0.60, 0.800), (0.85, 0.400), (1.00, 0.000)]
             let colors = stops.map {
-                NSColor(hue: hue, saturation: 0.60, brightness: 0.85, alpha: $0.1 * peakAlpha)
+                NSColor(hue: hue, saturation: 0.48, brightness: 0.90, alpha: $0.1 * peakAlpha)
             }
             let locations = stops.map { $0.0 }
 
