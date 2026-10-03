@@ -99,8 +99,10 @@ GPU         : 81.0%  显存 1.3 G
 
 ### 方式一：下载 DMG（最简单）
 
-1. 到 [Releases](../../releases) 页面下载最新的 `SysPulse-x.y.z.dmg`
-2. 双击打开，把 **SysPulse** 拖进 **Applications**
+**直接下载最新版 → [`SysPulse-1.0.0.dmg`](https://github.com/orange-ora/SysPulse/releases/download/v1.0.0/SysPulse-1.0.0.dmg)** （1.7 MB）
+
+1. 点上面的链接下载（也可以到 [Releases](../../releases) 页面挑版本）
+2. 双击打开 DMG，把 **SysPulse** 拖进 **Applications**
 3. **首次打开需要绕过 Gatekeeper**（本 App 未做 Apple 公证，是临时签名）：
 
    ```bash
