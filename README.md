@@ -71,12 +71,26 @@
 
 ### 命令行
 
+SysPulse 是 `.app` 包，**不在 `PATH` 里**，所以要带完整路径调用：
+
 ```bash
-SysPulse --dump                  # 打印一次全部指标（自检 / 排查用）
-SysPulse --enable-login-item     # 开启开机自启
-SysPulse --disable-login-item    # 关闭开机自启
-SysPulse --login-item-status     # 查询开机自启状态
+APP=/Applications/SysPulse.app/Contents/MacOS/SysPulse
+
+"$APP" --dump                  # 打印一次全部指标（自检 / 排查用）
+"$APP" --enable-login-item     # 开启开机自启
+"$APP" --disable-login-item    # 关闭开机自启
+"$APP" --login-item-status     # 查询开机自启状态
 ```
+
+`--dump` 不需要图形界面，可以在终端里直接确认采集是否正常。
+
+**想直接用 `SysPulse` 这个名字？** 建一个软链接即可（需要管理员密码）：
+
+```bash
+sudo ln -s /Applications/SysPulse.app/Contents/MacOS/SysPulse /usr/local/bin/SysPulse
+```
+
+之后 `SysPulse --dump` 就能用了。
 
 `--dump` 输出示例：
 
