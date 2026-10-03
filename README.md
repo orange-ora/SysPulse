@@ -103,17 +103,45 @@ GPU         : 81.0%  显存 1.3 G
 
 1. 点上面的链接下载（也可以到 [Releases](../../releases) 页面挑版本）
 2. 双击打开 DMG，把 **SysPulse** 拖进 **Applications**
-3. **首次打开需要绕过 Gatekeeper**（本 App 未做 Apple 公证，是临时签名）：
+3. **首次打开请用右键** —— 在「应用程序」里**右键点 `SysPulse` → 打开**，弹窗里再点一次「打开」
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/SysPulse.app
-   ```
-
-   或者：右键点 App → **打开** → 在弹窗里再点 **打开**（只需一次）。
+   > 只需要这一次。之后就能正常双击启动。
+   >
+   > 如果右键菜单里没有出现「打开」按钮，去 **系统设置 → 隐私与安全性**，往下滚到
+   > 「已阻止使用“SysPulse”」，点 **仍要打开**。
 
 4. 启动后菜单栏就会出现读数，没有程序坞图标
 
-> **为什么需要这一步？** 本 App 用 ad-hoc 临时签名（`codesign --sign -`），不是 Apple 开发者证书签名，也没做公证。这是开源项目的常规做法，但 macOS 会因此拦一下。代码全部开源，你可以自行审查。
+<details>
+<summary><b>为什么会被拦一下？</b></summary>
+
+SysPulse 用 **ad-hoc 临时签名** 打包，没有购买 Apple 开发者证书（$99/年）做签名与公证。
+macOS 因此无法确认「这个 App 是谁发布的」，会拦一道。
+
+这是 Apple 的安全机制，**不是 App 本身有问题**：
+
+- 签名完整性已验证通过（`codesign --verify --deep --strict` 返回 `valid on disk` +
+  `satisfies its Designated Requirement`）
+- 全部源码公开在本仓库，可自行审查
+- 无网络请求、不收集数据
+
+想彻底消除这道提示，只有购买 Apple 开发者证书并做公证一条路。
+</details>
+
+<details>
+<summary>兜底：命令行方式（绝大多数人用不上）</summary>
+
+只有当 macOS 把 App 判定为「**已损坏，无法打开**」时（而不是「身份不明的开发者」），
+才需要清除隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SysPulse.app
+```
+
+判断依据：`codesign --verify --deep --strict /Applications/SysPulse.app` 若返回
+`valid on disk`，说明签名完好，用上面的右键方法即可，**不需要跑这条命令**。
+</details>
+
 
 ### 方式二：从源码构建（推荐给开发者）
 
