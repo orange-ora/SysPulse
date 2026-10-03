@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/panel.png" width="340" alt="下拉面板：CPU / GPU / 内存 / 网络 四张卡片，各带 60 秒曲线">
+  <img src="docs/panel.png" width="340" alt="下拉面板：CPU / GPU / 内存 / 网络 四张卡片，各带迷你曲线">
 </p>
 
 ---
@@ -21,15 +21,15 @@
 - **四项指标**：网络下行、CPU、GPU、内存，用全称标签 `CPU / GPU / MEM`，顺序与面板卡片一致
 - **三档自适应排版**：空间够用单行；挤不下自动降到两行带标签；再不够降到极简两行
 
-  **① 单行** —— `↓660B CPU 27 GPU 71 MEM 71`，约 215 pt
+  **① 单行** —— `↓660B CPU 27 GPU 71 MEM 71`，约 213 pt
 
   <img src="docs/menubar-full.png" width="550" alt="单行排版">
 
-  **② 两行** —— `↓19K MEM 71` / `CPU 23 GPU 49`，约 110 pt
+  **② 两行** —— `↓19K MEM 71` / `CPU 23 GPU 49`，约 105 pt
 
   <img src="docs/menubar-compact.png" width="550" alt="两行排版">
 
-  **③ 极简** —— `↓0B` / `26 83 72`（这一档不带标签，所以 83 会变橙），约 80 pt
+  **③ 极简** —— `↓0B` / `26 83 72`（这一档不带标签，所以 83 会变橙），约 72 pt
 
   <img src="docs/menubar-minimal.png" width="550" alt="极简排版">
 
@@ -62,7 +62,7 @@
 
 点击菜单栏图标展开：
 
-- **CPU** —— 总占用、用户 / 系统占比、核心数、最近 60 秒曲线
+- **CPU** —— 总占用、用户 / 系统占比、核心数、最近 60 个采样点的曲线（跨度 = 60 × 刷新间隔，默认 1 秒刷新即约 1 分钟）
 - **GPU** —— 利用率（驱动 `Device Utilization %`，与活动监视器同源）、核心数、曲线
 - **内存** —— 占用比例、已用 / 总量、交换分区、曲线
 - **网络** —— 下行 / 上行速度、双线曲线、本次运行累计流量
@@ -176,7 +176,7 @@ xcode-select --install     # 如果还没装
 ```
 
 ```bash
-git clone git@github.com:orange-ora/SysPulse.git
+git clone https://github.com/orange-ora/SysPulse.git
 cd SysPulse
 ./build.sh
 ```
@@ -193,7 +193,7 @@ cd SysPulse
 ### 方式三：Swift Package Manager
 
 ```bash
-git clone git@github.com:orange-ora/SysPulse.git
+git clone https://github.com/orange-ora/SysPulse.git
 cd SysPulse
 swift build -c release
 ```
@@ -205,18 +205,18 @@ swift build -c release
 ## 卸载
 
 ```bash
-# 先退出 App（菜单栏图标 → 退出，或）
+# ① 如果开了开机自启，先关掉（要在删除 App 之前，否则下面这条没得执行）
+/Applications/SysPulse.app/Contents/MacOS/SysPulse --disable-login-item
+
+# ② 退出 App（菜单栏图标 → 退出，或）
 pkill -x SysPulse
+
+# ③ 删除 App 与偏好残留
 rm -rf /Applications/SysPulse.app
-# 偏好残留（可选）
 rm -f ~/Library/Preferences/com.local.syspulse.plist
 ```
 
-如果开了开机自启，建议先在面板里关掉，或：
-
-```bash
-/Applications/SysPulse.app/Contents/MacOS/SysPulse --disable-login-item
-```
+也可以不敲命令：先在面板里把「启动」关掉，再退出 App、把 `/Applications/SysPulse.app` 拖进废纸篓即可。
 
 ---
 
