@@ -11,7 +11,7 @@ let seconds = CommandLine.arguments.count > 2 ? (Double(CommandLine.arguments[2]
 // time，不是纳秒。** 必须用 `mach_timebase_info` 换算，直接除以 1e9 会少算
 // `numer/denom` 倍 —— 本机实测 numer=125 denom=3，即 41.67 倍。
 //
-// 这个 bug 的后果（2026-09-30 发现并修正）：README 里整张"开销实测"表都由此产生，
+// 这个 bug 的后果（2026-09-30 发现并修正）：README.dev.md 里整张"开销实测"表都由此产生，
 // 表中所有 CPU 数字都要**乘以约 41.67** 才是真实占用（例如标的 0.02% 实为 0.84%）。
 // 标定方法：跑一个已知单线程满载进程，正确换算应报 ≈100%，
 // 旧写法只报 2.39%（`Tools/CPUSpy` 对 `/tmp/burn` 的实测）。

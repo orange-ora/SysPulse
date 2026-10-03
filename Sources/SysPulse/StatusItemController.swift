@@ -508,7 +508,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         //
         // 当前 `animates = false` 下 `popoverDidClose` 是在 `performClose` 调用栈里**同步重入**的
         // （实测约 10ms），所以关闭窗口期几乎为 0、`pendingToggle` 来不及被置位，这条踩不到；
-        // 但**一旦以后把开合动画打开**（`popover.animates = true`，README 里讨论过），
+        // 但**一旦以后把开合动画打开**（`popover.animates = true`，README.dev.md 里讨论过），
         // `popoverDidClose` 就变成异步，这条立刻变成真 bug。所以现在就摆正。
         // 释放面板视图：不释放的话它会一直跟着数据每秒重绘，
         // 空闲 CPU 从 0.01% 涨到 0.05%。（窗口本身约 35MB 由 AppKit 持有，
@@ -579,7 +579,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // GPU 计数器**的机器上（虚拟机、部分 Intel 核显）宽度会永远不记账 ——
         // 三档宽度恒为 0 → `gain = iconWidth(wider) - iconWidth(target)` = `0 - 0` = 0 →
         // 升档判据 `gain > 0` 永不成立 → 自动适应**只能降档、永远升不回去**
-        // （症状与 README bug 2「gain 变量顺序写反」一模一样，很容易查错方向）。
+        // （症状与 README.dev.md bug 2「gain 变量顺序写反」一模一样，很容易查错方向）。
         // 注意它和"数据还没到位"是两回事：后者绝不能记账（见上），前者必须记账。
         // 两者的区分在 `GPUMonitor.unavailable`。
         // 用 `gpuAvailable`（取自 `GPUMonitor.available`）而**不是** `gpuUsage != nil`：
@@ -695,7 +695,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     ///
     /// 为什么不能只靠"渲染到哪档量哪档"：启动第一次渲染时数据还没到位（GPU 段缺失 → 宽度偏小），
     /// 而升档判据必须先知道"更宽那档要多占多少"。量不准就会在放不下的时候升上去（见调用处注释）。
-    /// 另外宽档不渲染就永远量不到（README bug 3 的坑），所以这里**主动**把三档都渲一遍。
+    /// 另外宽档不渲染就永远量不到（README.dev.md bug 3 的坑），所以这里**主动**把三档都渲一遍。
     private func primeDensityWidths(with snapshot: MetricsSnapshot, appearance: NSAppearance?, metricSet: [Bool]) {
         for (index, density) in densityOrder.enumerated() {
             let image = MenuBarImage.render(

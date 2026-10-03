@@ -291,11 +291,11 @@ final class GPUMonitor {
     /// - ①「刚启动、数据还没到位」—— 只是这几拍没有。此时**绝不能**记账宽度：
     ///   缺了 GPU 段渲出来的宽度偏小（实测单行档 159pt vs 真实 213pt），
     ///   拿它当升档依据会算出「装得下」，把宽档升到一个其实放不下的位置，
-    ///   窗口落进刘海折叠区、完全不绘制（README bug 6 实测 9.93 秒看不见图标）。
+    ///   窗口落进刘海折叠区、完全不绘制（README.dev.md bug 6 实测 9.93 秒看不见图标）。
     /// - ②「该机型根本没有」—— 永远不会有。此时**必须**照常记账：
     ///   否则 `StatusItemController.widthIsTrustworthy` 永远为 false，
     ///   三档宽度恒为 0 → `gain = 0 - 0 = 0` → 升档判据 `gain > 0` 永不成立，
-    ///   自动适应会**只能降档、永远升不回去**（症状与 README bug 2「gain 写反」一模一样）。
+    ///   自动适应会**只能降档、永远升不回去**（症状与 README.dev.md bug 2「gain 写反」一模一样）。
     ///
     /// 判据：连续 `unavailableAfterMisses` 拍都没能枚举到任何带
     /// `PerformanceStatistics` 的 IOAccelerator 服务。真机上 IOAccelerator
@@ -310,7 +310,7 @@ final class GPUMonitor {
     /// 宽度记账用的是这个、而不是 `snapshot.gpuUsage != nil`：**采集节流之后**
     /// 跳过的那些拍会沿用上一次的 `utilization`，于是"这一拍没采"和"这一拍采了但没有值"
     /// 在快照上看起来一样，`gpuUsage != nil` 就分不出来了。而 GPU 可用性一变，
-    /// 三档宽度必须重量 —— 漏掉就会一直用着缺 GPU 段时量到的偏小值（README bug 6）。
+    /// 三档宽度必须重量 —— 漏掉就会一直用着缺 GPU 段时量到的偏小值（README.dev.md bug 6）。
     var available: Bool { !unavailable }
 
     func sample() {
