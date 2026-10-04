@@ -117,32 +117,16 @@ macOS 菜单栏实时系统监控：**网速、内存、CPU、GPU** 一目了然
 ```bash
 cd SysPulse
 ./build.sh                 # 编译 + 安装到 /Applications/SysPulse.app（唯一副本）并启动
-./build.sh --local         # 只打包到本目录 dist/，不安装
+./build.sh --local         # 只输出 dist/SysPulse.app.zip，不安装
 ./build.sh --no-launch     # 安装但不自动启动
 ```
 
 `build.sh` 使用 `swiftc` 直接编译，产出 `arm64` + `x86_64` 通用二进制并做临时签名
-（ad-hoc），不需要 Xcode 工程。它会先退出正在运行的实例，并在安装后清掉本目录里的
-旧副本——**机器上只保留 `/Applications/SysPulse.app` 一份**。
+（ad-hoc），不需要 Xcode 工程。正式安装固定使用 `/Applications/SysPulse.app`，后续更新替换同一路径。
 
-如果 `--local` 打包过，`dist/` 里会多出一份；App 启动时也会优先转交给
-`/Applications` 那份并自行退出，所以不会出现两个菜单栏图标。
+候选、安装过渡包和回滚验证均在 `.noindex` 临时目录完成，并在退出时清理。签名及完整性校验成功后才精准退出正式实例；旧版只保留为 `Backups/` 下的压缩归档，安装或启动失败恢复旧版。应用程序目录不可写时明确失败，不会转存第二份正式应用。
 
-> **注意 `build.sh` 的安装判定用的是 `[ -w /Applications ]`**（当前用户是否可写），
-> 而不是"实际能不能创建文件"。如果 `/Applications` 是 `root:admin drwxrwxr-x`、
-> 当前用户属于 `admin` 组且目录**属于别人**，`[ -w ]` 会返回假，脚本会误判为不可写、
-> 静默改成只打包到 `dist/`，并且**已经先把正在运行的实例退出了**——结果是监控停了、
-> `/Applications` 里还是旧版。这种情况下要手工装回去：
->
-> ```bash
-> rm -rf /Applications/SysPulse.app
-> cp -R dist/SysPulse.app /Applications/SysPulse.app
-> codesign --force --deep --sign - /Applications/SysPulse.app
-> open /Applications/SysPulse.app
-> ```
->
-> （App 会主动把控制权转交给 `/Applications` 那份，所以直接 `open dist/SysPulse.app`
-> 验证不到新代码。）
+`--local` 只生成固定的 `dist/SysPulse.app.zip`，不安装、不退出正式实例，也不留下展开的应用副本。需要查看归档内容时，在 `.noindex` 临时目录解压，完成后删除该临时目录。发布 DMG 的卷根包含 `.metadata_never_index`，安装后推出安装盘即可。
 
 开机自启可以在面板的「启动」菜单里开关，也可以走命令行：
 
@@ -162,7 +146,7 @@ App 会**优先使用「应用程序」里的那一份**：同时只允许一个
 ## 命令行自检
 
 ```bash
-./dist/SysPulse.app/Contents/MacOS/SysPulse --dump
+/Applications/SysPulse.app/Contents/MacOS/SysPulse --dump
 ```
 
 会打印一次全部指标，用于确认数据源在本机是否可用：

@@ -16,7 +16,7 @@ swiftc -swift-version 5 -target "$TEST_TARGET" -warnings-as-errors -module-cache
 SOURCE_FILES=(
     Monitors.swift SystemMonitor.swift Preferences.swift LaunchAtLogin.swift
     Formatting.swift MenuBarImage.swift PanelAnchorAnimation.swift
-    DashboardView.swift StatusItemController.swift
+    DashboardView.swift StatusItemController.swift SingleInstance.swift
 )
 SOURCE_ARGS=()
 for source in "${SOURCE_FILES[@]}"; do

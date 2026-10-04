@@ -4,7 +4,7 @@
 
 原生 Swift + SwiftUI 编写，**零第三方依赖、零网络请求、不收集任何数据**。常驻菜单栏，不占程序坞。
 
-**v1.0.1（2026-10-04）**：修复网络流量与计时、GPU 曲线与布局恢复、自启注销、采样资源释放、流光连续性及进程计数。源码与安装包同步更新，详见 [更新记录](<CHANGELOG.md>)。
+**v1.0.2（2026-10-05）**：更新继续替换 `/Applications/SysPulse.app`，构建及回滚副本改为压缩归档，安装包临时卷不参与搜索索引，减少重复应用条目。保留 v1.0.1 的八项修复，详见 [更新记录](<CHANGELOG.md>)。
 
 <p align="center">
   <img src="docs/menubar-full.png" width="550" alt="菜单栏读数：↓660B CPU 27 GPU 71 MEM 71">
@@ -115,12 +115,12 @@ GPU         : 81.0%  显存 1.3 G
 
 ### 方式一：下载 DMG（最简单）
 
-**下载最新版 → [`SysPulse-1.0.1.dmg`](https://github.com/orange-ora/SysPulse/releases/download/v1.0.1/SysPulse-1.0.1.dmg)**
+**下载最新版 → [`SysPulse-1.0.2.dmg`](https://github.com/orange-ora/SysPulse/releases/download/v1.0.2/SysPulse-1.0.2.dmg)**
 
-> `v1.0.1` 安装包包含 [更新记录](<CHANGELOG.md>) 中的八项修复，支持 Apple Silicon 与 Intel，要求 macOS 14.0 或更高版本。
+> `v1.0.2` 安装包保留此前八项修复，并改进重复应用副本处理，支持 Apple Silicon 与 Intel，要求 macOS 14.0 或更高版本。
 
 1. 点上面的链接下载（也可以到 [Releases](../../releases) 页面挑版本）
-2. 双击打开 DMG，把 **SysPulse** 拖进 **Applications**
+2. 双击打开 DMG，把 **SysPulse** 拖进 **Applications**；已安装过时选择 **“替换”**，继续使用同一个正式版。
 3. **首次打开请用右键** —— 在「应用程序」里**右键点 `SysPulse` → 打开**，弹窗里再点一次「打开」
 
    > 只需要这一次。之后就能正常双击启动。
@@ -128,7 +128,7 @@ GPU         : 81.0%  显存 1.3 G
    > 如果右键菜单里没有出现「打开」按钮，去 **系统设置 → 隐私与安全性**，往下滚到
    > 「已阻止使用“SysPulse”」，点 **仍要打开**。
 
-4. 启动后菜单栏就会出现读数，**没有程序坞图标**
+4. 从 **Applications** 启动，菜单栏出现读数后推出 **SysPulse 安装盘**；正式版始终保留在 `/Applications/SysPulse.app`，**没有程序坞图标**。
 
    > **这是有意设计，不是装坏了。** SysPulse 是菜单栏工具：`Info.plist` 里
    > `LSUIElement = true`，代码里再调一次 `setActivationPolicy(.accessory)`，
@@ -190,7 +190,7 @@ cd SysPulse
 其他用法：
 
 ```bash
-./build.sh --local       # 只打包到本目录 dist/，不安装
+./build.sh --local       # 只生成 dist/SysPulse.app.zip，不安装或退出正式版
 ./build.sh --no-launch   # 安装但不自动启动
 ```
 

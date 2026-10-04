@@ -1,136 +1,186 @@
 #!/bin/bash
-# 构建 SysPulse 并安装到 /Applications（纯 swiftc，不依赖 Xcode 工程）
-#
-#   ./build.sh              编译 + 安装到 /Applications/SysPulse.app（唯一副本）
-#   ./build.sh --local      只在本目录打包到 dist/，不安装
-#   ./build.sh --no-launch  安装但不自动启动
+# 构建 SysPulse：默认只安装到 /Applications/SysPulse.app。
+# --local 仅输出 dist/SysPulse.app.zip，不退出或安装应用。
+# --no-launch 安装后不启动。临时展开的应用只存在于 .noindex 目录。
 set -euo pipefail
-
 cd "$(dirname "$0")"
 
 APP_NAME="SysPulse"
 BUILD="build"
 INSTALL_DIR="/Applications"
-
+APP_DIR="$INSTALL_DIR/$APP_NAME.app"
 LOCAL_ONLY=0
 LAUNCH=1
 for arg in "$@"; do
     case "$arg" in
-        --local)     LOCAL_ONLY=1 ;;
+        --local) LOCAL_ONLY=1 ;;
         --no-launch) LAUNCH=0 ;;
-        *) echo "未知参数: $arg"; exit 1 ;;
+        *) echo "未知参数: $arg" >&2; exit 1 ;;
     esac
 done
 
-# 安装位置：默认 /Applications（保证机器上只有一份），不可写或 --local 时退回 dist/
-if [ "$LOCAL_ONLY" = "1" ]; then
-    APP_DIR="dist/$APP_NAME.app"
-else
-    APP_DIR="$INSTALL_DIR/$APP_NAME.app"
+if [ "$LOCAL_ONLY" = 0 ]; then
     if [ ! -w "$INSTALL_DIR" ]; then
-        echo "==> $INSTALL_DIR 不可写，改为打包到本目录 dist/"
-        APP_DIR="dist/$APP_NAME.app"
+        echo "无法写入 $INSTALL_DIR；安装停止。可用 --local 生成压缩包。" >&2
+        exit 1
     fi
+    if [ -L "$APP_DIR" ] || { [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR" ]; }; then
+        echo "正式安装路径不是普通应用目录：$APP_DIR" >&2
+        exit 1
+    fi
+    TEMP_ROOT=$(mktemp -d "$INSTALL_DIR/.SysPulse-build.XXXXXX")
+else
+    TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/SysPulse-build.XXXXXX")
 fi
+# macOS BSD mktemp 只随机化末尾 X；先重命名空目录，再放入任何 .app。
+if [ -e "$TEMP_ROOT.noindex" ] || ! mv "$TEMP_ROOT" "$TEMP_ROOT.noindex"; then
+    rmdir "$TEMP_ROOT"
+    echo "无法建立唯一的 .noindex 暂存目录。" >&2
+    exit 1
+fi
+TEMP_ROOT="$TEMP_ROOT.noindex"
+CANDIDATE="$TEMP_ROOT/$APP_NAME.app"
+PREVIOUS="$TEMP_ROOT/previous/$APP_NAME.app"
+RUNNING_MARKER="$TEMP_ROOT/was-running"
+OLD_MOVED=0
+NEW_INSTALLED=0
+BACKUP_ARCHIVE=""
+
+cleanup() {
+    local result=$?
+    trap - EXIT HUP INT TERM
+    if [ "$result" != 0 ] && [ "$LOCAL_ONLY" = 0 ]; then
+        if [ "$NEW_INSTALLED" = 1 ]; then
+            rm -rf "$APP_DIR"
+        fi
+        if [ "$OLD_MOVED" = 1 ]; then
+            if ! mv "$PREVIOUS" "$APP_DIR"; then
+                echo "恢复旧版失败；旧版仍保留于 $PREVIOUS，压缩备份：$BACKUP_ARCHIVE" >&2
+                exit "$result"
+            fi
+            echo "安装失败，已恢复旧版：$APP_DIR" >&2
+        fi
+        if [ -f "$RUNNING_MARKER" ] && [ -d "$APP_DIR" ]; then
+            open "$APP_DIR" || echo "请手动启动已恢复的 $APP_DIR" >&2
+        fi
+    fi
+    rm -rf "$TEMP_ROOT"
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 export CLANG_MODULE_CACHE_PATH="$PWD/$BUILD/modulecache"
 export SWIFT_MODULECACHE_PATH="$PWD/$BUILD/modulecache"
 mkdir -p "$BUILD/modulecache"
-
 COMMON_FLAGS=(
-    -O -wmo
-    # ⚠️ **必须显式钉住 Swift 5 语言模式**，不能靠 swiftc 的默认值。
-    # 实测：同一份源码加 `-swift-version 6` 会直接报 12 个 error
-    # （Preferences.shared / LaunchAtLogin.shared / MenuBarImage.slotWidthCache /
-    #  SingleInstance.lockDescriptor 都不是并发安全的全局状态，Monitors 里还引用了
-    #  `vm_kernel_page_size` 这个可变全局量……）。现在能编过只是因为当前工具链默认落在
-    # Swift 5 模式；哪天 Xcode 把默认值改成 6，这个项目会毫无预兆地编不过。
-    -swift-version 5
+    -O -wmo -swift-version 5
     -module-cache-path "$PWD/$BUILD/modulecache"
-    -framework IOKit
-    -framework AppKit
-    -framework SwiftUI
-    -framework ServiceManagement
+    -framework IOKit -framework AppKit -framework SwiftUI -framework ServiceManagement
 )
-
 build_arch() {
-    local arch="$1"
-    swiftc "${COMMON_FLAGS[@]}" -target "${arch}-apple-macosx14.0" \
-        -o "$BUILD/$APP_NAME-$arch" Sources/SysPulse/*.swift
+    swiftc "${COMMON_FLAGS[@]}" -target "$1-apple-macosx14.0" \
+        -o "$BUILD/$APP_NAME-$1" Sources/SysPulse/*.swift
 }
-
 echo "==> 编译"
 rm -f "$BUILD/$APP_NAME" "$BUILD/$APP_NAME-arm64" "$BUILD/$APP_NAME-x86_64"
 if build_arch arm64 && build_arch x86_64; then
     lipo -create -output "$BUILD/$APP_NAME" "$BUILD/$APP_NAME-arm64" "$BUILD/$APP_NAME-x86_64"
     echo "    通用二进制 (arm64 + x86_64)"
 else
-    echo "    x86_64 交叉编译不可用，改用 arm64"
+    echo "    双架构构建不可用，改用 arm64"
     build_arch arm64
     mv "$BUILD/$APP_NAME-arm64" "$BUILD/$APP_NAME"
 fi
-
-if [ ! -f "Resources/AppIcon.icns" ]; then
-    echo "==> 生成图标"
-    swift Tools/MakeIcon.swift || echo "    (图标生成失败，跳过)"
+if [ ! -f Resources/AppIcon.icns ]; then
+    swift Tools/MakeIcon.swift
 fi
 
-WAS_RUNNING=0
-if pgrep -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
-    WAS_RUNNING=1
-    echo "==> 退出正在运行的实例"
-    pkill -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" || true
-    sleep 1
-fi
-
-echo "==> 打包 $APP_DIR"
-rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-cp "$BUILD/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
-cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
-if [ -f "Resources/AppIcon.icns" ]; then
-    cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
-fi
-
-# 把构建指纹写进**打包后**的 Info.plist（必须在 codesign 之前）。
-#
-# 为什么需要：历史文档里反复出现"装的是不是新版本"这个坑 —— 比 md5 不行
-# （codesign 会改二进制内容），比时间戳也会被骗（安装时机不同）。
-# 现在一条命令就能确认：
-#   defaults read /Applications/SysPulse.app/Contents/Info CFBundleVersion
-#   defaults read /Applications/SysPulse.app/Contents/Info SysPulseBuildStamp
-# CFBundleVersion 用 git 提交数（单调递增、纯数字，系统也认）；
-# SysPulseBuildStamp 记短哈希 + 是否有未提交改动 + 构建时刻，用来反查是哪一版。
+mkdir -p "$CANDIDATE/Contents/MacOS" "$CANDIDATE/Contents/Resources"
+cp "$BUILD/$APP_NAME" "$CANDIDATE/Contents/MacOS/$APP_NAME"
+cp Resources/Info.plist "$CANDIDATE/Contents/Info.plist"
+cp Resources/AppIcon.icns "$CANDIDATE/Contents/Resources/AppIcon.icns"
 BUILD_REV="unknown"; BUILD_COUNT=0; BUILD_DIRTY=""
 if git rev-parse --git-dir >/dev/null 2>&1; then
-    BUILD_REV=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-    BUILD_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
-    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-        BUILD_DIRTY="-dirty"     # 有未提交改动：装的东西不等于那个提交
-    fi
+    BUILD_REV=$(git rev-parse --short HEAD)
+    BUILD_COUNT=$(git rev-list --count HEAD)
+    if ! git diff --quiet || ! git diff --cached --quiet; then BUILD_DIRTY="-dirty"; fi
 fi
 BUILD_STAMP="${BUILD_REV}${BUILD_DIRTY}@$(date '+%Y%m%d-%H%M%S')"
-PLIST="$APP_DIR/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_COUNT" "$PLIST" >/dev/null 2>&1 || true
-/usr/libexec/PlistBuddy -c "Set :SysPulseBuildStamp $BUILD_STAMP" "$PLIST" >/dev/null 2>&1 \
-    || /usr/libexec/PlistBuddy -c "Add :SysPulseBuildStamp string $BUILD_STAMP" "$PLIST" >/dev/null 2>&1 \
-    || true
-echo "    构建指纹: $BUILD_STAMP   (CFBundleVersion = $BUILD_COUNT)"
+PLIST="$CANDIDATE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_COUNT" "$PLIST"
+if ! /usr/libexec/PlistBuddy -c "Set :SysPulseBuildStamp $BUILD_STAMP" "$PLIST" 2>/dev/null; then
+    /usr/libexec/PlistBuddy -c "Add :SysPulseBuildStamp string $BUILD_STAMP" "$PLIST"
+fi
+VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")
+case "$VERSION" in
+    ""|*[!0-9.]*|.*|*..*) echo "无效应用版本：$VERSION" >&2; exit 1 ;;
+esac
+echo "    构建指纹: $BUILD_STAMP (版本 ${VERSION}，build ${BUILD_COUNT})"
+codesign --force --deep --sign - "$CANDIDATE"
+codesign --verify --all-architectures --deep --strict "$CANDIDATE"
 
-codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || echo "    (临时签名跳过，本机仍可运行)"
-
-# 装到 /Applications 时，顺手清掉本目录可能残留的旧副本，避免出现两份
-if [ "$APP_DIR" = "$INSTALL_DIR/$APP_NAME.app" ] && [ -d "dist/$APP_NAME.app" ]; then
-    echo "==> 清理旧的本目录副本 dist/$APP_NAME.app"
-    rm -rf "dist/$APP_NAME.app"
+if [ "$LOCAL_ONLY" = 1 ]; then
+    mkdir -p dist
+    ARCHIVE="$TEMP_ROOT/$APP_NAME-$VERSION.app.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$CANDIDATE" "$ARCHIVE"
+    mv -f "$ARCHIVE" "dist/$APP_NAME.app.zip"
+    echo "==> 完成: dist/$APP_NAME.app.zip（未安装、未退出正在运行的应用）"
+    exit 0
 fi
 
+# 精准匹配正式 bundle 与可执行路径；其他目录中的同名应用不受影响。
+cat > "$TEMP_ROOT/StopInstalled.swift" <<'SWIFT'
+import AppKit
+import Foundation
+let installed = URL(fileURLWithPath: "/Applications/SysPulse.app").standardizedFileURL
+let executable = installed.appendingPathComponent("Contents/MacOS/SysPulse")
+let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.local.syspulse").filter {
+    $0.bundleURL?.standardizedFileURL == installed && $0.executableURL?.standardizedFileURL == executable
+}
+if !apps.isEmpty {
+    try Data().write(to: URL(fileURLWithPath: CommandLine.arguments[1]))
+    for app in apps {
+        guard app.terminate() else {
+            FileHandle.standardError.write(Data("正式应用拒绝退出，停止安装。\n".utf8))
+            exit(1)
+        }
+    }
+    let deadline = Date().addingTimeInterval(5)
+    while Date() < deadline && apps.contains(where: { !$0.isTerminated }) {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    guard apps.allSatisfy({ $0.isTerminated }) else {
+        FileHandle.standardError.write(Data("正式应用未及时退出，停止安装。\n".utf8))
+        exit(1)
+    }
+}
+SWIFT
+swiftc -O -swift-version 5 -module-cache-path "$PWD/$BUILD/modulecache" \
+    -framework AppKit "$TEMP_ROOT/StopInstalled.swift" -o "$TEMP_ROOT/stop-installed"
+
+# 先保存并回读压缩备份，再退出旧实例；旧展开包只暂存于 .noindex，失败可回滚。
+if [ -d "$APP_DIR" ]; then
+    mkdir -p Backups "$TEMP_ROOT/backup-check" "$TEMP_ROOT/previous"
+    BACKUP_ARCHIVE="$PWD/Backups/$APP_NAME-before-${BUILD_STAMP}-$$.app.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$TEMP_ROOT/previous.app.zip"
+    ditto -x -k "$TEMP_ROOT/previous.app.zip" "$TEMP_ROOT/backup-check"
+    cmp "$APP_DIR/Contents/MacOS/$APP_NAME" "$TEMP_ROOT/backup-check/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+    cmp "$APP_DIR/Contents/Info.plist" "$TEMP_ROOT/backup-check/$APP_NAME.app/Contents/Info.plist"
+    mv "$TEMP_ROOT/previous.app.zip" "$BACKUP_ARCHIVE"
+    rm -rf "$TEMP_ROOT/backup-check"
+fi
+"$TEMP_ROOT/stop-installed" "$RUNNING_MARKER"
+if [ -d "$APP_DIR" ]; then
+    mv "$APP_DIR" "$PREVIOUS"
+    OLD_MOVED=1
+fi
+mv "$CANDIDATE" "$APP_DIR"
+NEW_INSTALLED=1
+codesign --verify --all-architectures --deep --strict "$APP_DIR"
+if [ "$LAUNCH" = 1 ]; then open "$APP_DIR"; fi
+# 成功后只留下正式安装包与压缩备份；EXIT trap 删除临时展开旧包。
 echo "==> 完成: $APP_DIR"
-if [ "$APP_DIR" = "$INSTALL_DIR/$APP_NAME.app" ]; then
-    echo "    自检: \"$APP_DIR/Contents/MacOS/$APP_NAME\" --dump"
-    if [ "$LAUNCH" = "1" ]; then
-        open "$APP_DIR"
-    fi
-else
-    echo "    启动: open \"$APP_DIR\""
-fi
+if [ -n "$BACKUP_ARCHIVE" ]; then echo "    旧版压缩备份: $BACKUP_ARCHIVE"; fi

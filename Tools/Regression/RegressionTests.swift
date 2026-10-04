@@ -294,6 +294,18 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         check(later < 0.001, "glow: subsequent cycle boundary is also continuous")
     }
 
+    static func installationIdentity() {
+        func canonical(_ path: String) -> Bool {
+            SingleInstance.isCanonicalInstallation(URL(fileURLWithPath: path))
+        }
+        check(canonical("/Applications/SysPulse.app"), "installation: canonical bundle is the formal app")
+        check(canonical("/Applications/../Applications/SysPulse.app"), "installation: equivalent canonical path is accepted")
+        check(!canonical("/Applications/SysPulse copy.app"), "installation: renamed copy is not the formal app")
+        check(!canonical("/Applications/Utilities/SysPulse.app"), "installation: nested Applications copy is not formal")
+        check(!canonical("/Volumes/SysPulse 1.0.2/SysPulse.app"), "installation: mounted download is not formal")
+        check(!canonical("/Applications-other/SysPulse.app"), "installation: path prefix does not grant formal identity")
+    }
+
     static func main() {
         precondition(Bundle.main.bundleIdentifier != "com.local.syspulse",
                      "Regression tests must run as a raw isolated executable, never the installed app.")
@@ -304,6 +316,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         hostReferences()
         processCount()
         glow()
+        installationIdentity()
         print("\n\(passed) regression assertions passed. No GUI app installation or real login-item changes.")
     }
 }

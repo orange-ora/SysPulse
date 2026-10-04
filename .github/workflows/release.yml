@@ -41,6 +41,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          RELEASE_TEMP=$(mktemp -d "${RUNNER_TEMP}/SysPulse-release.XXXXXX")
+          trap 'rm -rf "$RELEASE_TEMP"' EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          test ! -e "$RELEASE_TEMP.noindex"
+          mv "$RELEASE_TEMP" "$RELEASE_TEMP.noindex"
+          RELEASE_TEMP="$RELEASE_TEMP.noindex"
+          export RELEASE_TEMP
+          mkdir -p release "$RELEASE_TEMP/staging"
+          touch "$RELEASE_TEMP/staging/.metadata_never_index"
           python3 - <<'PY'
           from pathlib import Path
           import datetime, os, plistlib, shutil, subprocess
@@ -50,23 +61,24 @@ jobs:
           assert os.environ['GITHUB_REF_NAME'] == 'v' + version, 'Tag and application version differ'
           info['CFBundleVersion'] = subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], text=True).strip()
           info['SysPulseBuildStamp'] = os.environ['GITHUB_SHA'][:7] + '@' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
-          app = Path('release/staging/SysPulse.app')
+          stage = Path(os.environ['RELEASE_TEMP']) / 'staging'
+          app = stage / 'SysPulse.app'
           (app / 'Contents/MacOS').mkdir(parents=True)
           (app / 'Contents/Resources').mkdir()
           shutil.copy2('build/SysPulse', app / 'Contents/MacOS/SysPulse')
           shutil.copy2('Resources/AppIcon.icns', app / 'Contents/Resources/AppIcon.icns')
           with (app / 'Contents/Info.plist').open('wb') as stream:
               plistlib.dump(info, stream)
-          Path('release/staging/Applications').symlink_to('/Applications', target_is_directory=True)
+          (stage / 'Applications').symlink_to('/Applications', target_is_directory=True)
           Path('release/version.txt').write_text(version)
           notes = '# SysPulse v' + version + '\n\nmacOS 14.0+；通用安装包支持 Apple Silicon 与 Intel。应用采用 ad-hoc 签名，首次打开方式见 README。随包提供 SHA-256 校验文件。\n\n'
           notes += Path('CHANGELOG.md').read_text().split('\n', 2)[2]
           Path('release/notes.md').write_text(notes)
           PY
-          codesign --force --deep --sign - release/staging/SysPulse.app
-          codesign --verify --all-architectures --deep --strict release/staging/SysPulse.app
+          codesign --force --deep --sign - "$RELEASE_TEMP/staging/SysPulse.app"
+          codesign --verify --all-architectures --deep --strict "$RELEASE_TEMP/staging/SysPulse.app"
           VERSION="${GITHUB_REF_NAME#v}"
-          hdiutil create -volname "SysPulse ${VERSION}" -srcfolder release/staging \
+          hdiutil create -volname "SysPulse ${VERSION}" -srcfolder "$RELEASE_TEMP/staging" \
             -fs APFS -format UDZO "release/SysPulse-${VERSION}.dmg"
           hdiutil verify "release/SysPulse-${VERSION}.dmg"
           python3 - <<'PY'
@@ -84,6 +96,18 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
+          if gh release view "$GITHUB_REF_NAME" --json tagName >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME 已存在，保留已有安装包并跳过发布。"
+            exit 0
+          fi
+          if ! gh release create "$GITHUB_REF_NAME" \
             "release/SysPulse-${VERSION}.dmg" "release/SysPulse-${VERSION}.dmg.sha256" \
-            --verify-tag --latest --title "SysPulse ${GITHUB_REF_NAME}" --notes-file release/notes.md
+            --verify-tag --latest --title "SysPulse ${GITHUB_REF_NAME}" --notes-file release/notes.md; then
+            # 人工发布可能在检查与创建之间完成；只检查，不覆盖或重新上传附件。
+            if gh release view "$GITHUB_REF_NAME" --json tagName >/dev/null 2>&1; then
+              echo "Release $GITHUB_REF_NAME 已由其他发布任务创建，保留已有附件。"
+            else
+              echo "Release 创建失败，且未找到同版本发布。" >&2
+              exit 1
+            fi
+          fi

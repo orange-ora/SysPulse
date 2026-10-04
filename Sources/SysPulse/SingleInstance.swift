@@ -12,11 +12,16 @@ enum SingleInstance {
     private static let installedApp = URL(fileURLWithPath: "/Applications/SysPulse.app")
     private static var lockDescriptor: Int32 = -1
 
+    static func isCanonicalInstallation(_ bundleURL: URL) -> Bool {
+        bundleURL.resolvingSymlinksInPath().standardizedFileURL.path ==
+            installedApp.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     /// 在创建界面之前调用。若本进程不该继续运行，会直接退出。
     static func enforce() {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.local.syspulse"
         let myPID = ProcessInfo.processInfo.processIdentifier
-        let iAmInstalled = Bundle.main.bundleURL.standardizedFileURL.path.hasPrefix("/Applications/")
+        let iAmInstalled = isCanonicalInstallation(Bundle.main.bundleURL)
 
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { $0.processIdentifier != myPID }
@@ -30,7 +35,7 @@ enum SingleInstance {
             }
         } else {
             // 我不是：优先让「应用程序」里那份来跑
-            if others.contains(where: { $0.bundleURL?.path.hasPrefix("/Applications/") == true }) {
+            if others.contains(where: { $0.bundleURL.map(isCanonicalInstallation) ?? false }) {
                 exit(0)
             }
             if FileManager.default.fileExists(atPath: installedApp.path) {
