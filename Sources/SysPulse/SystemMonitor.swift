@@ -76,8 +76,7 @@ final class SystemMonitor: ObservableObject {
         cpu.sample()
         // GPU 按周期节流（见 gpuSampleEveryTicks 的注释）。跳过的拍沿用上一次读数，
         // 所以 `gpu.utilization` / `unavailable` 这两个状态量保持上一次的值不变。
-        // `tick % N == 0`：tick 从 0 起，第一拍（tick 变 1 之前）就采到，
-        // 保证启动时立刻有数据、宽度记账不会拿到"缺 GPU 段"的偏小值。
+        // tick从0起，第一拍就尝试GPU采样；读数未就绪时由状态栏宽度保护禁用升级。
         if tick % gpuSampleEveryTicks == 0 { gpu.sample() }
         memory.sample()
         network.sample()
@@ -107,7 +106,7 @@ final class SystemMonitor: ObservableObject {
 
         snapshot = next
         cpuHistory = push(cpuHistory, next.cpuUsage)
-        gpuHistory = push(gpuHistory, next.gpuUsage ?? 0)
+        gpuHistory = push(gpuHistory, (next.gpuUsage ?? 0) / 100)
         memoryHistory = push(memoryHistory, next.memoryFraction)
         downHistory = push(downHistory, next.downSpeed)
         upHistory = push(upHistory, next.upSpeed)

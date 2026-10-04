@@ -202,8 +202,8 @@ enum MenuBarImage {
 
     /// 背景动效总入口，按给定效果分发。
     ///
-    /// `phase` 为 nil = 不画（关闭，或这一帧不需要动效层）。两个效果共用同一个相位时钟
-    /// （`StatusItemController` 的定时器），所以切换效果时不会出现"跳动一下"。
+    /// `elapsed` 为 nil = 不画（关闭，或这一帧不需要动效层）。两个效果共用经过时间
+    /// （`StatusItemController` 的定时器），各层独立换算角度。
     ///
     /// ⚠️ **效果类型必须从参数传进来，不能读 `Preferences.shared`。**
     /// 一开始这里读的是全局单例，结果是：① 渲染函数不再可测（测试进程有自己的
@@ -214,14 +214,16 @@ enum MenuBarImage {
         switch effect {
         case .off: return
         case .glow:
-            // 流光的相位推进速度由 drawGlow 里的 `turns` 决定，这里只做周期归一化
-            drawGlow(size: size, phase: (elapsed / effectGlowCycleSeconds).truncatingRemainder(dividingBy: 1))
+            // 两层各自将实际角度归一化；不能先把共用时间相位归零，
+            // 否则流光每 12 秒走了 2.5 圈，重置时会跳半圈。
+            drawGlow(size: size, elapsed: elapsed)
         case .diffuse:
             drawDiffuse(size: size, elapsed: elapsed)
         }
     }
 
-    /// 流光走完一整圈所需秒数（漫散射不用它 —— 它按每个光点自己的 `period` 走）。
+    /// 流光与水波的时间基准；每个基准周期推进各自 turns / travel 个波长。
+    /// 漫散射不用它 —— 它按每个光点自己的 `period` 走。
     static let effectGlowCycleSeconds: Double = 12
 
     /// 漫散射层：几个柔和的径向光斑**各自沿不同方向、以不同速度游走**，互相叠加。
@@ -418,7 +420,7 @@ enum MenuBarImage {
 
     /// 流光层：**整条背景**都在流动的彩色渐变，铺在指标文字底下。
     ///
-    /// - `phase` 为 nil 表示不画（功能关闭），取值 0…1 循环。
+    /// - `elapsed` 为 nil 表示不画（功能关闭），否则按连续经过秒数推进。
     /// - 彩色部分：沿横向放 **3 组颜色带、相位各差 120°**，每组用一个正弦"包"控制明暗——
     ///   正弦一明一暗就是一道色带，三组错开就表现为**整条上此起彼伏的彩色流动**，
     ///   而不是一道光从左扫到右。纯计算 + 一次 `NSGradient.draw`，很便宜。
@@ -426,12 +428,13 @@ enum MenuBarImage {
     ///   想恢复的话见 `Backups/MenuBarImage.swift.流光-v3.5-亮且浓-2026-09-16`。
     /// - 彩色部分**只横向渐变**（`angle: 0`）：竖向恒定，否则那点高度会从紫到蓝糊掉。
     ///   竖向的变化交给上面那层"水波"（`drawRipple`）用明暗做，而不是让色相在竖向也变。
-    static func drawGlow(size: NSSize, phase: Double?) {
-        guard let phase else { return }
+    static func drawGlow(size: NSSize, elapsed: Double?) {
+        guard let elapsed else { return }
         // 三组色相：蓝 → 紫 → 青，互相错开，流动时颜色一直在变
         let baseHues: [CGFloat] = [0.58, 0.75, 0.50]
         let cycle: CGFloat = 240          // 一组色带的波长（pt）
-        let turns: CGFloat = 2.5          // 相位推进速度：一相位周期内跑 2.5 个波长
+        let turns: CGFloat = 2.5          // 每 12 秒推进 2.5 个波长，保持原速度
+        let phase = (elapsed / effectGlowCycleSeconds * Double(turns)).truncatingRemainder(dividingBy: 1)
         let samples = 14
 
         var colors: [NSColor] = []
@@ -441,7 +444,7 @@ enum MenuBarImage {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
             for (index, baseHue) in baseHues.enumerated() {
                 let offset = CGFloat(index) / CGFloat(baseHues.count)
-                let s = sin(2 * .pi * (u / cycle * size.width + CGFloat(phase) * turns + offset))
+                let s = sin(2 * .pi * (u / cycle * size.width + CGFloat(phase) + offset))
                 var hue = (baseHue + s * 0.06).truncatingRemainder(dividingBy: 1)
                 if hue < 0 { hue += 1 }
                 let color = NSColor(hue: hue, saturation: 1.08, brightness: 1.25, alpha: 1)
@@ -461,7 +464,7 @@ enum MenuBarImage {
             .draw(in: path, angle: 0)
 
         // 彩色光带之上再叠一层"水波"（明暗起伏），见 drawRipple 的注释
-        drawRipple(size: size, phase: phase)
+        drawRipple(size: size, elapsed: elapsed)
     }
 
     /// 水波起伏层：在彩色光带**之上**叠一层明暗波纹，波面略微倾斜、相位随时间上下推移 ——
@@ -469,7 +472,7 @@ enum MenuBarImage {
     ///
     /// 实现上只多花**一次** `NSGradient.draw`（不是把画面切成很多横条去逐条画）：
     /// 一条竖向、略斜的渐变，白 / 黑交替若干道 —— 白色提亮、黑色压暗，叠在光带上就是起伏；
-    /// `phase` 随时间推移 = 波纹在上下走。开销与原来同一量级（实测见 README.dev.md 开销表）。
+    /// `elapsed` 随时间推移 = 波纹在上下走。开销与原来同一量级（实测见 README.dev.md 开销表）。
     ///
     /// 可调参数（都在函数里，改完 `./build.sh` 即可）：
     /// - `bands`  竖直方向上有几道波纹（越大越密；1.1 ≈ 上下一道明 + 一道暗）
@@ -478,10 +481,11 @@ enum MenuBarImage {
     /// - `waveAngle` 渐变轴的角度：**必须接近 90°（竖直）**，条纹才是横着的、随时间上下走；
     ///   90° 完全水平如百叶窗，偏一点更像水波。⚠️ 一开始写成 14°（接近横向），
     ///   结果等于又叠了一层横向条纹、竖向几乎没有起伏（离屏量测的竖向落差只有 0.02~0.04）。
-    static func drawRipple(size: NSSize, phase: Double?) {
-        guard let phase else { return }
+    static func drawRipple(size: NSSize, elapsed: Double?) {
+        guard let elapsed else { return }
         let bands: CGFloat = 1.1
         let travel: CGFloat = 2.0
+        let phase = (elapsed / effectGlowCycleSeconds * Double(travel)).truncatingRemainder(dividingBy: 1)
         let strength: CGFloat = 0.18
         let waveAngle: CGFloat = 78
         let samples = 12
@@ -490,7 +494,7 @@ enum MenuBarImage {
         var locations: [CGFloat] = []
         for i in 0...samples {
             let u = CGFloat(i) / CGFloat(samples)
-            let s = sin(2 * .pi * (u * bands + CGFloat(phase) * travel))
+            let s = sin(2 * .pi * (u * bands + CGFloat(phase)))
             // 正半周提亮、负半周压暗：一个正弦就是一明一暗一道波纹
             colors.append(s >= 0 ? NSColor(white: 1, alpha: s * strength)
                                  : NSColor(white: 0, alpha: -s * strength))

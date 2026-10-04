@@ -24,7 +24,8 @@ final class LaunchAtLogin: ObservableObject {
                     try SMAppService.mainApp.register()
                 }
             } else {
-                if SMAppService.mainApp.status == .enabled {
+                let status = SMAppService.mainApp.status
+                if status == .enabled || status == .requiresApproval {
                     try SMAppService.mainApp.unregister()
                 }
             }

@@ -4,6 +4,8 @@
 
 原生 Swift + SwiftUI 编写，**零第三方依赖、零网络请求、不收集任何数据**。常驻菜单栏，不占程序坞。
 
+**源码更新（2026-10-04）**：修复网络流量与计时、GPU 曲线与布局恢复、自启注销、采样资源释放、流光连续性及进程计数。详见 [更新记录](<CHANGELOG.md>)，开发者可运行其中的回归用例。
+
 <p align="center">
   <img src="docs/menubar-full.png" width="550" alt="菜单栏读数：↓660B CPU 27 GPU 71 MEM 71">
 </p>
@@ -113,7 +115,9 @@ GPU         : 81.0%  显存 1.3 G
 
 ### 方式一：下载 DMG（最简单）
 
-**直接下载最新版 → [`SysPulse-1.0.0.dmg`](https://github.com/orange-ora/SysPulse/releases/download/v1.0.0/SysPulse-1.0.0.dmg)** （1.7 MB）
+**已发布安装包 → [`SysPulse-1.0.0.dmg`](https://github.com/orange-ora/SysPulse/releases/download/v1.0.0/SysPulse-1.0.0.dmg)** （1.7 MB）
+
+> `v1.0.0` DMG 不含 2026-10-04 的源码修复；使用本次修复请按下面的「方式二：从源码构建」安装。
 
 1. 点上面的链接下载（也可以到 [Releases](../../releases) 页面挑版本）
 2. 双击打开 DMG，把 **SysPulse** 拖进 **Applications**

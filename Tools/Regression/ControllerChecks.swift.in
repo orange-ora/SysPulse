@@ -1,0 +1,185 @@
+    static func runChecks() {
+        var sampleSequence = 0
+        func sampled(_ source: MetricsSnapshot) -> MetricsSnapshot {
+            sampleSequence += 1
+            var snapshot = source
+            snapshot.timestamp = Date(timeIntervalSinceReferenceDate: Double(sampleSequence))
+            return snapshot
+        }
+        var pending = MetricsSnapshot()
+        pending.gpuUsage = nil
+        pending.gpuUnavailable = false
+        pending.gpuAvailable = true
+        var ready = pending
+        ready.gpuUsage = 80
+        var unavailable = pending
+        unavailable.gpuUnavailable = true
+        unavailable.gpuAvailable = false
+        precondition(!gpuWidthState(for: pending, showGPU: true).isTrustworthy)
+        precondition(gpuWidthState(for: ready, showGPU: true).hasSegment)
+        precondition(gpuWidthState(for: unavailable, showGPU: true).isTrustworthy)
+        precondition(!gpuWidthState(for: unavailable, showGPU: true).hasSegment)
+        precondition(gpuWidthState(for: pending, showGPU: false).isTrustworthy)
+
+        let c = StatusItemController()
+        c.densityWidths = [161,106,50]
+        c.didPrimeDensityWidths = true
+        c.primedMetricSet = [true,true,true,true,false]
+        c.updateStatusItem(with: sampled(pending))
+        precondition(c.densityWidths == [0,0,0] && !c.didPrimeDensityWidths)
+        precondition(c.measuredDensityIndex == 1 && c.recentMinX.isEmpty)
+        print("pending with stale widths: cache cleared, compact retained; first-frame position discarded")
+        c.updateStatusItem(with: sampled(ready))
+        precondition(c.densityWidths[0] == 215 && c.densityWidths[1] == 106 && c.densityWidths[2] == 74)
+        precondition(c.measuredDensityIndex == 1)
+        print("nil→value recovery at x1071: full width215 primed BEFORE decision; compact retained")
+
+        c.statusItem.button!.window!.frame.origin.x = 1160
+        c.updateStatusItem(with: sampled(ready))
+        precondition(c.measuredDensityIndex == 0)
+        print("ready with enough space: normal upgrade to full")
+        c.measuredDensityIndex = 1
+        c.lastDensityChangeAt = nil
+        c.recentMinX = []
+        c.updateStatusItem(with: sampled(pending))
+        precondition(c.measuredDensityIndex == 1 && !c.didPrimeDensityWidths)
+        print("value→nil at roomy x1160: old complete widths invalidated; no upgrade")
+
+        c.lastDensityChangeAt = nil
+        c.recentMinX = [960]
+        c.statusItem.button!.window!.frame.origin.x = 960
+        c.updateStatusItem(with: sampled(pending))
+        precondition(c.measuredDensityIndex == 2)
+        print("pending crowded x960: downgrade remains allowed")
+
+        c.lastDensityChangeAt = nil
+        c.recentMinX = []
+        c.measuredDensityIndex = 1
+        c.lastRenderedImageWidth = 106
+        c.statusItem.button!.window!.frame.origin.x = 1071
+        c.updateStatusItem(with: sampled(unavailable))
+        precondition(c.didPrimeDensityWidths && c.densityWidths[0] == 161 && c.densityWidths[2] == 50)
+        precondition(c.measuredDensityIndex == 0)
+        print("confirmed unavailable: missing-GPU shape161 measured; normal upgrade allowed")
+
+        c.measuredDensityIndex = 1
+        c.lastRenderedImageWidth = 106
+        c.lastDensityChangeAt = nil
+        c.recentMinX = []
+        c.preferences.showGPU = false
+        c.updateStatusItem(with: sampled(pending))
+        precondition(c.measuredDensityIndex == 0 && c.didPrimeDensityWidths)
+        print("GPU preference off: pending no longer blocks upgrade")
+
+        c.measuredDensityIndex = 1
+        c.lastDensityChangeAt = nil
+        c.recentMinX = []
+        c.preferences.showGPU = true
+        c.statusItem.button!.window!.frame.origin.x = 1160
+        c.densityWidths = [215,0,74]
+        c.adaptToAvailableSpace(allowUpgrade: true)
+        precondition(c.measuredDensityIndex == 1)
+        print("explicit zero current width: upgrade rejected")
+
+        c.preferences.menuBarLayout = .compact
+        c.updateStatusItem(with: sampled(ready))
+        precondition(c.currentDensityIndex == 1)
+        c.preferences.menuBarLayout = .full
+        c.updateStatusItem(with: sampled(pending))
+        precondition(c.currentDensityIndex == 0)
+        print("fixed compact/full choices preserved")
+
+        c.preferences.menuBarLayout = .auto
+        c.measuredDensityIndex = 1
+        c.lastDensityChangeAt = nil
+        c.recentMinX = []
+        c.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        precondition(c.measuredDensityIndex == 1 && c.recentMinX.isEmpty)
+        print("effect-frame update: width can refresh; layout decision skipped")
+        c.lastDensityChangeAt = Date()
+        c.updateStatusItem(with: sampled(ready))
+        precondition(c.measuredDensityIndex == 1)
+        print("existing two-second cooldown still prevents immediate upgrade")
+        let unchanged = StatusItemController()
+        unchanged.measuredDensityIndex = 0
+        unchanged.lastRenderedImageWidth = 215
+        unchanged.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        unchanged.recentMinX = [1100]
+        unchanged.statusItem.button!.window!.frame.origin.x = 960
+        unchanged.updateStatusItem(with: sampled(ready))
+        precondition(unchanged.measuredDensityIndex == 0 && unchanged.recentMinX == [1100,960])
+        unchanged.updateStatusItem(with: sampled(ready))
+        precondition(unchanged.measuredDensityIndex == 1 && unchanged.recentMinX == [1100,960,960])
+        print("unchanged shape: original two-sample downgrade window retains history and downgrades only after second crowded sample")
+        unchanged.measuredDensityIndex = 0
+        unchanged.lastRenderedImageWidth = 215
+        unchanged.lastDensityChangeAt = nil
+        unchanged.recentMinX = [1120,960]
+        unchanged.updateStatusItem(with: sampled(ready))
+        precondition(unchanged.measuredDensityIndex == 0 && unchanged.recentMinX == [1120,960,960])
+        print("unchanged shape: accepted five-sample maximum may still veto downgrade; behavior preserved")
+        let firstFrame = StatusItemController()
+        firstFrame.statusItem.button!.window!.frame.origin.x = 1400
+        firstFrame.updateStatusItem(with: sampled(ready))
+        precondition(firstFrame.measuredDensityIndex == 1 && firstFrame.recentMinX.isEmpty)
+        firstFrame.statusItem.button!.window!.frame.origin.x = 1014
+        firstFrame.updateStatusItem(with: sampled(ready))
+        precondition(firstFrame.measuredDensityIndex == 1)
+        print("first ready frame without previous image: unknown x1400 discarded; actual next x1014 cannot falsely upgrade")
+        let minimal = StatusItemController()
+        minimal.measuredDensityIndex = 2
+        minimal.lastRenderedImageWidth = 50
+        minimal.statusItem.button!.window!.frame = NSRect(x: 1038, y: 0, width: 66, height: 24)
+        minimal.updateStatusItem(with: sampled(ready))
+        precondition(minimal.densityWidths[2] == 74 && minimal.lastRenderedImageWidth == 74)
+        precondition(minimal.measuredDensityIndex == 2)
+        print("minimal nil→value: old50pt/new74pt mismatch blocks upgrade before resized window exists")
+        // Same right edge 1104, after actual renderer width74 + system padding16.
+        minimal.statusItem.button!.window!.frame = NSRect(x: 1014, y: 0, width: 90, height: 24)
+        minimal.updateStatusItem(with: sampled(ready))
+        precondition(minimal.measuredDensityIndex == 2)
+        print("minimal recovery next frame: actual x1014 cannot fit compact, remains minimal")
+        minimal.statusItem.button!.window!.frame.origin.x = 1100
+        minimal.updateStatusItem(with: sampled(ready))
+        precondition(minimal.measuredDensityIndex == 1)
+        print("minimal recovery with enough real space: subsequent upgrade allowed")
+        let effectRecovery = StatusItemController()
+        effectRecovery.measuredDensityIndex = 2
+        effectRecovery.lastRenderedImageWidth = 50
+        effectRecovery.recentMinX = [1038,1038]
+        effectRecovery.statusItem.button!.window!.frame = NSRect(x: 1038, y: 0, width: 66, height: 24)
+        let recoveredSample = sampled(ready)
+        effectRecovery.updateStatusItem(with: recoveredSample, allowLayoutChange: false)
+        precondition(effectRecovery.densityWidths[2] == 74 && effectRecovery.lastRenderedImageWidth == 74)
+        precondition(effectRecovery.measuredDensityIndex == 2 && effectRecovery.recentMinX.isEmpty)
+        print("effect-first minimal recovery: width74 rendered without density decision; stale x1038 history cleared")
+        effectRecovery.updateStatusItem(with: recoveredSample)
+        precondition(effectRecovery.measuredDensityIndex == 2 && effectRecovery.recentMinX.isEmpty)
+        precondition(effectRecovery.shapeChangeSnapshotTimestamp == recoveredSample.timestamp)
+        print("same-snapshot immediate layout at old x1038: upgrade blocked and intermediate geometry discarded")
+        // Repeated preference/effect callbacks must not remove the same-snapshot block.
+        effectRecovery.updateStatusItem(with: recoveredSample, allowLayoutChange: false)
+        effectRecovery.updateStatusItem(with: recoveredSample)
+        precondition(effectRecovery.measuredDensityIndex == 2 && effectRecovery.recentMinX.isEmpty)
+        print("same-snapshot repeated effect/layout: shape identity gate remains in force")
+        effectRecovery.statusItem.button!.window!.frame = NSRect(x: 1014, y: 0, width: 90, height: 24)
+        effectRecovery.updateStatusItem(with: sampled(ready))
+        precondition(effectRecovery.measuredDensityIndex == 2 && effectRecovery.recentMinX == [1014])
+        print("new snapshot after effect-first recovery: only actual x1014 used; cannot falsely upgrade compact")
+        effectRecovery.statusItem.button!.window!.frame.origin.x = 1100
+        effectRecovery.updateStatusItem(with: sampled(ready))
+        precondition(effectRecovery.measuredDensityIndex == 1)
+        print("new snapshot with enough real space after identity gate: upgrade resumes")
+        // An ordinary effect frame with unchanged shape must not discard accepted history.
+        effectRecovery.recentMinX = [1120,1014]
+        effectRecovery.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        precondition(effectRecovery.recentMinX == [1120,1014] && effectRecovery.measuredDensityIndex == 1)
+        print("unchanged effect frame: history and density stay untouched")
+        let compactRecovery = StatusItemController()
+        compactRecovery.lastRenderedImageWidth = 106
+        compactRecovery.statusItem.button!.window!.frame.origin.x = 1160
+        compactRecovery.updateStatusItem(with: sampled(ready))
+        precondition(compactRecovery.measuredDensityIndex == 0)
+        print("compact nil→value: actual width106 unchanged, upgrade has no extra recovery delay")
+        print("PASS: exact update/prime/adapt functions, real renderer, fake coordinates; no real GUI")
+    }

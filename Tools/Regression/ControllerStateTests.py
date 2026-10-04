@@ -1,0 +1,57 @@
+"""Exercise the real GPU-width update/prime/adapt bodies with fake coordinates.
+
+No NSStatusItem, real windows, installed app, or UserDefaults are created.
+The compiler also builds the full controller in run.sh's primary test phase;
+this separate phase supplies deterministic window geometry for its state pipeline.
+"""
+from pathlib import Path
+import platform
+import subprocess
+import sys
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+OUTPUT = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / 'build/regression/controller'
+OUTPUT.mkdir(parents=True, exist_ok=True)
+
+
+def block(text, signature):
+    """Extract current source bodies, never a hand-maintained copy of the logic."""
+    start = text.index(signature)
+    begin = text.index('{', start)
+    depth, cursor = 1, begin + 1
+    while depth:
+        if text[cursor] == '{':
+            depth += 1
+        elif text[cursor] == '}':
+            depth -= 1
+        cursor += 1
+    return text[start:cursor]
+
+
+controller = (REPO / 'Sources/SysPulse/StatusItemController.swift').read_text()
+methods = [block(controller, signature) for signature in [
+    '    static func gpuWidthState(',
+    '    private func updateStatusItem(',
+    '    private func primeDensityWidths(',
+    '    private var ceilingIndex:',
+    '    private var currentDensityIndex:',
+    '    private func adaptToAvailableSpace(',
+    '    static func tint(',
+]]
+metrics = block((REPO / 'Sources/SysPulse/Monitors.swift').read_text(), 'struct MetricsSnapshot')
+(OUTPUT / 'MetricsSnapshot.swift').write_text('import Foundation\n' + metrics + '\n')
+scaffold = (HERE / 'ControllerScaffold.swift.in').read_text()
+checks = (HERE / 'ControllerChecks.swift.in').read_text()
+(OUTPUT / 'ControllerUnderTest.swift').write_text(scaffold + '\n'.join(methods) + '\n' + checks + '\n}\n')
+(OUTPUT / 'ExtractedMethods.swift.txt').write_text('\n'.join(methods))
+(OUTPUT / 'Entry.swift').write_text('@main struct Entry { static func main() { StatusItemController.runChecks() } }\n')
+
+subprocess.run([
+    'swiftc', '-O', '-swift-version', '5', '-target', f'{platform.machine()}-apple-macosx14.0',
+    '-warnings-as-errors', '-framework', 'AppKit', '-module-cache-path', str(OUTPUT / 'modulecache'),
+    str(OUTPUT / 'MetricsSnapshot.swift'), str(OUTPUT / 'ControllerUnderTest.swift'),
+    str(REPO / 'Sources/SysPulse/MenuBarImage.swift'), str(REPO / 'Sources/SysPulse/Formatting.swift'),
+    str(OUTPUT / 'Entry.swift'), '-o', str(OUTPUT / 'ControllerStateTests'),
+], check=True)
+subprocess.run([str(OUTPUT / 'ControllerStateTests')], check=True)

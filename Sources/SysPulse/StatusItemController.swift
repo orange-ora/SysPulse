@@ -42,6 +42,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let anchorAnimationDuration: CFTimeInterval = 0.18
     /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
     private var lastRenderedImageWidth: CGFloat?
+    /// 引发内容宽度变化的快照身份；同一快照的多个回调仍可能看到窗口中间态。
+    /// 只比较身份，不按时长等待；下一份采样到达后恢复正常升级判定。
+    private var shapeChangeSnapshotTimestamp: Date?
     /// 动画进行中收到的点击先记账，等动画结束再补上，避免被系统忽略
     private var pendingToggle = false
     private var isAnimating = false
@@ -526,11 +529,37 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     // MARK: - 状态栏
 
+    /// GPU 宽度状态与实际绘制段保持一致；未就绪时不能预估完整宽度。
+    static func gpuWidthState(for snapshot: MetricsSnapshot, showGPU: Bool) -> (hasSegment: Bool, isTrustworthy: Bool) {
+        let hasSegment = showGPU && snapshot.gpuUsage != nil
+        return (hasSegment, !showGPU || hasSegment || snapshot.gpuUnavailable)
+    }
+
     /// - Parameter allowLayoutChange: 是否允许在本次调用里重新决定排版档位。
     ///   动效的定时器每帧都会调用这里，**必须传 false**——否则升降档会以帧率（10Hz）反复触发，
     ///   测量值还没稳定就被下一次决策推翻，档位就会 full↔compact↔minimal 无限横跳。
     private func updateStatusItem(with snapshot: MetricsSnapshot, allowLayoutChange: Bool = true) {
         guard let button = statusItem.button else { return }
+
+        // 菜单栏外观跟着壁纸明暗走，状态栏项按钮是最可靠的取样点
+        let appearance = button.effectiveAppearance
+        // 宽度必须对应实际渲染的 GPU 段。gpuAvailable 包含“尚未拿到数据”，
+        // 且与 gpuUnavailable 互为反值，不能用两者的或运算判断完整快照。
+        let gpuWidth = Self.gpuWidthState(for: snapshot, showGPU: preferences.showGPU)
+        let widthIsTrustworthy = gpuWidth.isTrustworthy
+        let metricSet = [preferences.showNetwork, preferences.showCPU, preferences.showMemory,
+                         preferences.showGPU, gpuWidth.hasSegment]
+        // 先处理形状变化并量准各档，再让升档判据使用宽度；未就绪时丢弃旧缓存，
+        // 仍可按位置降档，但不能用旧宽度或零宽度升级。
+        if widthIsTrustworthy {
+            if !didPrimeDensityWidths || metricSet != primedMetricSet {
+                primeDensityWidths(with: snapshot, appearance: appearance, metricSet: metricSet)
+            }
+        } else {
+            densityWidths = [0, 0, 0]
+            didPrimeDensityWidths = false
+            primedMetricSet = []
+        }
 
         // ⚠️ **档位判定必须在取 `currentDensityIndex` 之前跑。**
         //
@@ -554,14 +583,28 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 动效的定时器每帧也会调用这里（allowLayoutChange: false）——如果让它也触发
         // 升降档判定，就会以 15Hz 反复决策：测量值还没稳定就被下一次推翻，档位在
         // full↔compact↔minimal 之间无限横跳（实测每秒一轮，菜单栏看起来像在"转"）。
+        // 形状变化时窗口仍对应上一张图（例如极简缺 GPU 50pt → 有 GPU 74pt）。
+        // 只在当前已显示宽度与新缓存一致时升级；不一致先渲染本档，下一拍再判断。
+        let renderedWidthMatches = lastRenderedImageWidth.map {
+            abs($0 - densityWidths[currentDensityIndex]) < 0.01
+        } ?? false
+        if lastRenderedImageWidth == nil ||
+           (widthIsTrustworthy && didPrimeDensityWidths && !renderedWidthMatches) {
+            shapeChangeSnapshotTimestamp = snapshot.timestamp
+        }
+        let isShapeChangeSnapshot = shapeChangeSnapshotTimestamp == snapshot.timestamp
         if allowLayoutChange {
-            adaptToAvailableSpace()
+            adaptToAvailableSpace(allowUpgrade: widthIsTrustworthy && didPrimeDensityWidths &&
+                                  renderedWidthMatches && !isShapeChangeSnapshot)
+        }
+        if isShapeChangeSnapshot {
+            // 首帧和形状改变时，同一快照的效果/偏好/布局回调可能仍读到旧窗口位置。
+            // 数据帧已按原规则检查降档；直到下一份采样才收集新形状的几何历史。
+            recentMinX.removeAll()
         }
 
         let index = currentDensityIndex
 
-        // 菜单栏外观跟着壁纸明暗走，状态栏项按钮是最可靠的取样点
-        let appearance = button.effectiveAppearance
         let image = MenuBarImage.render(
             snapshot: snapshot,
             preferences: preferences,
@@ -570,30 +613,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             effect: preferences.menuBarEffect,
             effectElapsed: preferences.menuBarEffect != .off ? effectElapsed : nil
         )
-        // 宽度记账（升档判据靠它算"更宽那档要多占多少"）：
-        // ⚠️ 数据还没到位那一次渲染里 GPU 段会**整段缺失**，量出来的宽度偏小
-        // （实测单行档 159pt vs 真实 213pt）。拿它当升档依据，会在**放不下**的时候把宽档
-        // 升上去（升降判据用的是"升档后的左边缘"，宽度算小了自然算得下），
-        // 结果窗口落进折叠区、完全不绘制，再花 5 拍退回来——实测 9.93 秒看不见图标。
-        // 三个条件里第三个（`gpuUnavailable`）是 2026-09-17 补的：没有它，在**本机根本没有
-        // GPU 计数器**的机器上（虚拟机、部分 Intel 核显）宽度会永远不记账 ——
-        // 三档宽度恒为 0 → `gain = iconWidth(wider) - iconWidth(target)` = `0 - 0` = 0 →
-        // 升档判据 `gain > 0` 永不成立 → 自动适应**只能降档、永远升不回去**
-        // （症状与 README.dev.md bug 2「gain 变量顺序写反」一模一样，很容易查错方向）。
-        // 注意它和"数据还没到位"是两回事：后者绝不能记账（见上），前者必须记账。
-        // 两者的区分在 `GPUMonitor.unavailable`。
-        // 用 `gpuAvailable`（取自 `GPUMonitor.available`）而**不是** `gpuUsage != nil`：
-        // 采集节流之后跳过的拍会沿用上一次的 utilization，"没采"和"采了没值"在快照上
-        // 看起来一样，拿 gpuUsage 判断就会在节流窗口里漏掉 GPU 可用性的变化。
-        let gpuUsable = snapshot.gpuAvailable
-        let widthIsTrustworthy = !preferences.showGPU || gpuUsable || snapshot.gpuUnavailable
-        // `gpuUsable` 也放进这个"渲染形状键"：GPU 可用性一变，渲出来的宽度就变了，
-        // 必须把三档宽度重新量一遍（否则会一直用着缺 GPU 段时量到的偏小值）。
-        let metricSet = [preferences.showNetwork, preferences.showCPU, preferences.showMemory,
-                         preferences.showGPU, gpuUsable]
-        if widthIsTrustworthy, !didPrimeDensityWidths || metricSet != primedMetricSet {
-            primeDensityWidths(with: snapshot, appearance: appearance, metricSet: metricSet)
-        }
+        // 当前档保留实测最大宽度，完整缓存已在上面的档位决策前建立。
         if widthIsTrustworthy, let width = image?.size.width {
             densityWidths[index] = max(densityWidths[index], width)
         }
@@ -697,6 +717,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 而升档判据必须先知道"更宽那档要多占多少"。量不准就会在放不下的时候升上去（见调用处注释）。
     /// 另外宽档不渲染就永远量不到（README.dev.md bug 3 的坑），所以这里**主动**把三档都渲一遍。
     private func primeDensityWidths(with snapshot: MetricsSnapshot, appearance: NSAppearance?, metricSet: [Bool]) {
+        densityWidths = [0, 0, 0]
         for (index, density) in densityOrder.enumerated() {
             let image = MenuBarImage.render(
                 snapshot: snapshot,
@@ -707,7 +728,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             guard let width = image?.size.width else { continue }
             densityWidths[index] = width
         }
-        didPrimeDensityWidths = true
+        didPrimeDensityWidths = densityWidths.allSatisfy { $0 > 0 }
         primedMetricSet = metricSet
     }
 
@@ -735,7 +756,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 这里读取上一次布局后的实际横坐标来决定档位。关键是**升档必须确认"更宽的那一档
     /// 真的放得下"**：只按余量判断的话，降档后条目变窄、左边缘右移、余量又变大，
     /// 于是立刻升回宽档，宽档又放不下——就会每秒左右横跳，宽档那一秒还会被刘海吞掉。
-    private func adaptToAvailableSpace() {
+    private func adaptToAvailableSpace(allowUpgrade: Bool) {
         guard preferences.menuBarLayout == .auto,
               let window = statusItem.button?.window,
               window.frame.width > 0
@@ -789,16 +810,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         //    否则会"升上去又放不下→再降"来回跳）。
         //    ⚠️ gain 的变量顺序写反过（得到负数），后果是升档分支永远进不去，
         //    表现为"自动档明明有空间却永远停在窄档"。
-        if target > ceilingIndex {
+        if allowUpgrade, target > ceilingIndex {
             let wider = target - 1
-            let gain = iconWidth(wider) - iconWidth(target)
+            let widerWidth = iconWidth(wider)
+            let currentWidth = iconWidth(target)
+            let gain = widerWidth - currentWidth
             // 关键：不能用"当前档的余量"去判断能不能升档。
             // 升档会多占 gain 宽度，左边缘会相应**左移 gain**——必须看**升档后的左边缘**
             // 还满不满足"离安全区至少 40pt"。
             // 实测反例：两行档时 minX=1072（余量 84.5，看着够），但升到单行要多占 108，
             // 左边缘落到 964 —— 比要求的 988 还靠左 24pt，属于画不出来的区域。
             // 用旧写法（`slack > gain + buffer`）就会误升，结果单行整条被刘海吞掉。
-            if gain > 0, effectiveMinX - gain >= margin + densityUpgradeBuffer {
+            if widerWidth > 0, currentWidth > 0, gain > 0,
+               effectiveMinX - gain >= margin + densityUpgradeBuffer {
                 target = wider
             }
         }

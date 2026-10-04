@@ -24,12 +24,11 @@ struct MetricsSnapshot {
 
     var downSpeed: Double = 0
     var upSpeed: Double = 0
-    /// 本次运行期间累计（内核只提供 32 位计数器，无法还原开机以来的真实总量）
+    /// 本次运行期间可信采样的累计；不把新接口已有计数或无法恢复的暂停区间冒充流量。
     var totalDown: UInt64 = 0
     var totalUp: UInt64 = 0
 
-    /// GPU 是否**有计数器可用**。宽度记账用它判断"要不要因为 GPU 段缺失而重量三档宽度"，
-    /// 不能改用 `gpuUsage != nil` —— 节流跳采时那个值会被沿用，分不出"没采"和"采了没值"。
+    /// 采样能力提示，包含尚未就绪状态；布局宽度使用实际gpuUsage段及gpuUnavailable判断。
     var gpuAvailable: Bool = true
 
     var uptime: TimeInterval = 0
@@ -53,7 +52,9 @@ final class CPUMonitor {
         var infoCount: mach_msg_type_number_t = 0
         var cpuCount: natural_t = 0
 
-        guard host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &cpuCount, &cpuInfo, &infoCount) == KERN_SUCCESS,
+        let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
+        guard host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &cpuCount, &cpuInfo, &infoCount) == KERN_SUCCESS,
               let info = cpuInfo else { return }
 
         defer {
@@ -120,9 +121,11 @@ final class MemoryMonitor {
         var stats = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
 
+        let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
         let result = withUnsafeMutablePointer(to: &stats) { pointer -> kern_return_t in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+                host_statistics64(host, HOST_VM_INFO64, $0, &count)
             }
         }
 
@@ -144,134 +147,209 @@ final class MemoryMonitor {
 
 // MARK: - 网络
 
-/// 通过 `NET_RT_IFLIST2` 读取网卡计数器并做差分。
-/// 只统计物理接口（en*），避免 lo0 / utun（VPN）/ awdl 造成重复计数。
-///
-/// 注意：macOS 在这里给出的字节计数器实际会按 2³² 回绕（用 `netstat -ib` 对比即可发现，
-/// 下行的 `ifi_ibytes` 只是真实值的低 32 位），所以差分必须做回绕处理，
-/// 累计流量也只能由我们自己逐次累加。
-final class NetworkMonitor {
-    private struct Counters {
-        let rx: UInt64
-        let tx: UInt64
-        let time: TimeInterval
+/// 内核计数器的纯差分状态。输入身份包含 index、名字和链路地址；不使用永久名字缓存。
+struct NetworkInterfaceID: Hashable {
+    let index: UInt16
+    let name: String
+    let linkAddress: [UInt8]
+
+    init(index: UInt16, name: String, linkAddress: [UInt8] = []) {
+        self.index = index
+        self.name = name
+        self.linkAddress = linkAddress
     }
+}
 
-    private var last: Counters?
+struct NetworkInterfaceCounters {
+    enum Width { case automatic, bits32, bits64 }
+    let received: UInt64
+    let sent: UInt64
+    var width: Width = .automatic
+}
 
+/// 在可观测边界内累计本次运行流量。没有读数时不调用 ingest，即保留基线。
+/// 仅靠两个读数不能区分边界附近的重置与回绕，也不能恢复多次32位回绕：
+/// 这里只接受≤1GiB的边界回绕候选；其余下降按重置丢弃该方向增量。
+/// 超过30秒的间隔（含休眠）仅重建可能32位的方向基线；确认64位的方向继续累计。
+struct NetworkAccumulator {
+    private struct Baseline {
+        var counters: NetworkInterfaceCounters
+        var receivedIs64: Bool
+        var sentIs64: Bool
+    }
+    private var previous: [NetworkInterfaceID: Baseline] = [:]
+    private var previousTime: TimeInterval?
     private(set) var downSpeed: Double = 0
     private(set) var upSpeed: Double = 0
     private(set) var totalDown: UInt64 = 0
     private(set) var totalUp: UInt64 = 0
 
-    private static let mask: UInt64 = 0xFFFF_FFFF
+    static let minimumInterval: TimeInterval = 0.05
+    static let maximumInterval: TimeInterval = 30
+    private static let mask = UInt64(UInt32.max)
+    private static let maximumWrapDelta: UInt64 = 1 << 30
 
-    /// 32 位计数器回绕安全的差分；对真正的 64 位计数器同样适用。
-    private static func delta(_ current: UInt64, _ previous: UInt64) -> UInt64 {
-        if current >= previous { return current - previous }
-        return (mask - (previous & mask)) + (current & mask) + 1
+    /// false 表示时间无效或过短；既不推进时间，也不推进计数基线。
+    @discardableResult
+    mutating func ingest(_ current: [NetworkInterfaceID: NetworkInterfaceCounters],
+                         at time: TimeInterval, resetBaseline: Bool = false) -> Bool {
+        guard time.isFinite, time >= 0 else { return false }
+        if let oldTime = previousTime, !resetBaseline {
+            let elapsed = time - oldTime
+            guard elapsed.isFinite, elapsed > Self.minimumInterval else { return false }
+            var received: UInt64 = 0
+            var sent: UInt64 = 0
+            for (identity, counters) in current {
+                guard let old = previous[identity] else { continue } // 新接口只建基线
+                guard counters.width == old.counters.width else { continue }
+                let receivedIs64 = old.receivedIs64 || counters.received > Self.mask
+                let sentIs64 = old.sentIs64 || counters.sent > Self.mask
+                if elapsed <= Self.maximumInterval || receivedIs64 {
+                    received = Self.add(received, Self.delta(counters.received, old.counters.received,
+                                                            is64: receivedIs64, width: counters.width))
+                }
+                if elapsed <= Self.maximumInterval || sentIs64 {
+                    sent = Self.add(sent, Self.delta(counters.sent, old.counters.sent,
+                                                    is64: sentIs64, width: counters.width))
+                }
+            }
+            downSpeed = Double(received) / elapsed
+            upSpeed = Double(sent) / elapsed
+            totalDown = Self.add(totalDown, received)
+            totalUp = Self.add(totalUp, sent)
+        } else {
+            downSpeed = 0
+            upSpeed = 0
+        }
+        // 完整替换会移除消失接口；下次同名设备接入不继承已移除的基线。
+        var next: [NetworkInterfaceID: Baseline] = [:]
+        for (identity, counters) in current {
+            let old = previous[identity].flatMap { $0.counters.width == counters.width ? $0 : nil }
+            next[identity] = Baseline(counters: counters,
+                                     receivedIs64: counters.width == .bits64 || counters.received > Self.mask || old?.receivedIs64 == true,
+                                     sentIs64: counters.width == .bits64 || counters.sent > Self.mask || old?.sentIs64 == true)
+        }
+        previous = next
+        previousTime = time
+        return true
     }
 
-    /// 复用的 sysctl 缓冲与接口名缓存。
-    ///
-    /// 为什么要有：`NetworkMonitor.sample` 原本每拍做两件事都很浪费 ——
-    /// ① 每拍 `[UInt8](repeating: 0, count: length)` 新分配一块（几 KB）缓冲，用完就扔；
-    /// ② 对表里**每一个**接口都调一次 `if_indextoname` 并造一个 `String`，
-    ///    只为判断它是不是 `en*`，而实际上真正要统计的只有 1~2 个。
-    /// 实测 `NetworkMonitor.sample` 410µs/次（2026-09-30，占空闲基线约 25%）。
-    ///
-    /// 改成：缓冲留作实例属性按需增长复用；接口名按 index 缓存（接口 index 在进程生命周期内
-    /// 不会重编号，但插拔网卡会新增 index，所以是缓存而不是一次性快照）。
-    ///
-    /// ⚠️ 尺寸缓存必须**允许增长**：两次 `sysctl` 之间接口表一旦变大（VPN 连断、插拔 USB 网卡、
-    /// iPhone 共享网络），旧尺寸会直接 ENOMEM。所以失败且 `length` 变大时就重分配再试一次，
-    /// 而不是把旧缓冲硬套上去。
-    private var buffer: [UInt8] = []
-    private var interfaceNameCache: [UInt16: String] = [:]
+    private static func delta(_ current: UInt64, _ old: UInt64, is64: Bool,
+                              width: NetworkInterfaceCounters.Width) -> UInt64 {
+        if current >= old { return current - old }
+        guard width != .bits64, !is64, old <= mask, current <= mask,
+              old >= mask - maximumWrapDelta, current <= maximumWrapDelta else { return 0 }
+        let wrapped = mask - old + current + 1
+        return wrapped <= maximumWrapDelta ? wrapped : 0
+    }
 
-    /// 读一次所有 `en*` 的累计收发字节。
-    ///
-    /// ⚠️ **返回 nil 表示「这一拍没读到」，绝不能用 `(0, 0)` 冒充读数。**
-    /// 因为 0 一定小于上一次的值，会被 `delta` 判成「32 位计数器回绕」而走补偿分支，
-    /// 凭空算出一个 0~4 GiB 的差分（实测：上次 5 GB → 幻影 3.34 GiB；2 秒刷新周期下
-    /// 折合 **1795 MB/s** 的假读数），而且 `sample()` 里的 `&+=` 会把这笔幻影字节数
-    /// **永久**累加进「本次运行流量」——错了不会自愈。
-    ///
-    /// 什么时候会失败：第二次 `sysctl` 的缓冲区长度取自第一次调用，两次之间接口表
-    /// 一旦增长（VPN 连接/断开、插拔 USB 网卡、iPhone 共享网络）就会 ENOMEM。
-    /// 下面失败后重试一次正是为了吃掉这种情况。
-    private func counters() -> (rx: UInt64, tx: UInt64)? {
+    private static func add(_ a: UInt64, _ b: UInt64) -> UInt64 {
+        let result = a.addingReportingOverflow(b)
+        return result.overflow ? UInt64.max : result.partialValue
+    }
+}
+
+/// 通过 NET_RT_IFLIST2 读取每个 en* 接口，逐接口差分后求和。
+final class NetworkMonitor {
+    private var accumulator = NetworkAccumulator()
+    private var buffer: [UInt8] = []
+    var downSpeed: Double { accumulator.downSpeed }
+    var upSpeed: Double { accumulator.upSpeed }
+    var totalDown: UInt64 { accumulator.totalDown }
+    var totalUp: UInt64 { accumulator.totalUp }
+
+    private static let secondsPerTick: Double = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return Double(info.numer) / Double(info.denom) / 1_000_000_000
+    }()
+
+    private func counters() -> [NetworkInterfaceID: NetworkInterfaceCounters]? {
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
         var length: size_t = buffer.count
-
         if length == 0 {
-            guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) >= 0, length > 0 else { return nil }
+            guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) == 0 else { return nil }
+            guard length > 0 else { return [:] }
             buffer = [UInt8](repeating: 0, count: length)
         }
-
-        if sysctl(&mib, u_int(mib.count), &buffer, &length, nil, 0) < 0 {
-            // 尺寸不够（接口表变大了）：按新尺寸重分配再试一次
-            guard length > buffer.count else { return nil }
-            buffer = [UInt8](repeating: 0, count: length)
-            guard sysctl(&mib, u_int(mib.count), &buffer, &length, nil, 0) >= 0 else { return nil }
-        }
-
-        var rx: UInt64 = 0
-        var tx: UInt64 = 0
-
-        buffer.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            var offset = 0
-            while offset + MemoryLayout<if_msghdr>.size <= Int(length) {
-                let header = base.advanced(by: offset).assumingMemoryBound(to: if_msghdr.self).pointee
-                let messageLength = Int(header.ifm_msglen)
-                guard messageLength > 0 else { break }
-
-                if Int32(header.ifm_type) == RTM_IFINFO2 {
-                    // 只有 `en*` 才计入。接口名按 index 缓存 —— 原来对表里每个接口
-                    // 都调一次 if_indextoname 并造 String，而绝大多数都不是 en*。
-                    if let name = interfaceName(header.ifm_index), name.hasPrefix("en") {
-                        let message = base.advanced(by: offset).assumingMemoryBound(to: if_msghdr2.self).pointee
-                        rx += UInt64(message.ifm_data.ifi_ibytes)
-                        tx += UInt64(message.ifm_data.ifi_obytes)
-                    }
-                }
-                offset += messageLength
+        // ENOMEM 返回长度不保证是新容量；失败时重新查询，不冒充0读数。
+        var readSucceeded = false
+        for _ in 0..<3 {
+            length = buffer.count
+            let result = buffer.withUnsafeMutableBytes {
+                sysctl(&mib, u_int(mib.count), $0.baseAddress, &length, nil, 0)
             }
+            if result == 0 { readSucceeded = true; break }
+            guard errno == ENOMEM else { return nil }
+            length = 0
+            guard sysctl(&mib, u_int(mib.count), nil, &length, nil, 0) == 0 else { return nil }
+            guard length > 0 else { return [:] }
+            buffer = [UInt8](repeating: 0, count: length)
         }
+        guard readSucceeded, length <= buffer.count else { return nil }
 
-        return (rx, tx)
+        return buffer.withUnsafeBytes { Self.parseCounters($0, length: length, resolveName: Self.interfaceName) }
     }
 
-    private func interfaceName(_ index: UInt16) -> String? {
-        if let cached = interfaceNameCache[index] { return cached }
+    static func parseCounters(_ raw: UnsafeRawBufferPointer, length: Int,
+                              resolveName: (UInt16) -> String? = { _ in nil }) -> [NetworkInterfaceID: NetworkInterfaceCounters]? {
+        guard length >= 0, length <= raw.count else { return nil }
+        var result: [NetworkInterfaceID: NetworkInterfaceCounters] = [:]
+        var offset = 0
+        while offset < length {
+            // 所有路由消息只有前4字节布局相同；NEWADDR等消息比if_msghdr短。
+            guard length - offset >= 4 else { return nil }
+            let messageLength = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
+            guard messageLength >= 4, messageLength <= length - offset else { return nil }
+            defer { offset += messageLength }
+            guard Int32(raw[offset + 3]) == RTM_IFINFO2 else { continue }
+            guard messageLength >= MemoryLayout<if_msghdr2>.size else { return nil }
+            let message = raw.loadUnaligned(fromByteOffset: offset, as: if_msghdr2.self)
+            var name: String?
+            var linkAddress: [UInt8] = []
+            if message.ifm_addrs & RTA_IFP != 0 {
+                // 地址按RTAX位图顺序排列，跳过IFP之前的sockaddr（4字节对齐）。
+                var addressOffset = offset + MemoryLayout<if_msghdr2>.size
+                for bit in 0..<Int(RTAX_IFP) where message.ifm_addrs & (1 << bit) != 0 {
+                    guard addressOffset < offset + messageLength else { return nil }
+                    let precedingLength = Int(raw[addressOffset])
+                    let paddedLength = max(4, (precedingLength + 3) & ~3)
+                    guard paddedLength <= offset + messageLength - addressOffset else { return nil }
+                    addressOffset += paddedLength
+                }
+                let remaining = offset + messageLength - addressOffset
+                guard remaining >= 8 else { return nil }
+                let addressLength = Int(raw[addressOffset])
+                guard addressLength >= 8, addressLength <= remaining,
+                      Int32(raw[addressOffset + 1]) == AF_LINK else { return nil }
+                let nameLength = Int(raw[addressOffset + 5])
+                let linkLength = Int(raw[addressOffset + 6])
+                guard 8 + nameLength + linkLength <= addressLength else { return nil }
+                let dataOffset = addressOffset + 8
+                name = String(decoding: raw[dataOffset..<(dataOffset + nameLength)], as: UTF8.self)
+                linkAddress = Array(raw[(dataOffset + nameLength)..<(dataOffset + nameLength + linkLength)])
+            }
+            // 少数服务没有链路地址。只在本拍查询，不缓存失败/旧名字；非en接口不影响其他读数。
+            if name == nil || name?.isEmpty == true { name = resolveName(message.ifm_index) }
+            guard let name, name.hasPrefix("en") else { continue }
+            let identity = NetworkInterfaceID(index: message.ifm_index, name: name, linkAddress: linkAddress)
+            result[identity] = NetworkInterfaceCounters(received: UInt64(message.ifm_data.ifi_ibytes),
+                                                        sent: UInt64(message.ifm_data.ifi_obytes))
+        }
+        return result
+    }
+
+    private static func interfaceName(_ index: UInt16) -> String? {
         var name = [CChar](repeating: 0, count: Int(IF_NAMESIZE) + 1)
         guard if_indextoname(UInt32(index), &name) != nil else { return nil }
-        let resolved = String(cString: name)
-        interfaceNameCache[index] = resolved
-        return resolved
+        return String(cString: name)
     }
 
     func sample() {
-        // 读不到就**整拍作废**：既不更新 downSpeed / upSpeed，也不更新 `last`。
-        // 不更新 `last` 是关键——下一拍成功时 elapsed 覆盖的是这整段间隔，
-        // 差分除以真实间隔仍然是正确均值，不会因为漏了一拍就把速率算飞。
         guard let current = counters() else { return }
-        let now = Date().timeIntervalSinceReferenceDate
-
-        if let last {
-            let elapsed = now - last.time
-            if elapsed > 0.05 {
-                let received = NetworkMonitor.delta(current.rx, last.rx)
-                let sent = NetworkMonitor.delta(current.tx, last.tx)
-                downSpeed = Double(received) / elapsed
-                upSpeed = Double(sent) / elapsed
-                totalDown &+= received
-                totalUp &+= sent
-            }
-        }
-
-        last = Counters(rx: current.rx, tx: current.tx, time: now)
+        // continuous mach time单调递增且包含睡眠；长间隔由accumulator明确重建基线。
+        let now = Double(mach_continuous_time()) * Self.secondsPerTick
+        accumulator.ingest(current, at: now)
     }
 }
 
@@ -297,27 +375,34 @@ final class GPUMonitor {
     ///   三档宽度恒为 0 → `gain = 0 - 0 = 0` → 升档判据 `gain > 0` 永不成立，
     ///   自动适应会**只能降档、永远升不回去**（症状与 README.dev.md bug 2「gain 写反」一模一样）。
     ///
-    /// 判据：连续 `unavailableAfterMisses` 拍都没能枚举到任何带
-    /// `PerformanceStatistics` 的 IOAccelerator 服务。真机上 IOAccelerator
-    /// 从开机就存在（哪怕利用率是 0），所以正常机器第一拍就会把它清掉；
-    /// 用「连续几拍」而不是「一拍」是为了躲开启动瞬间 IORegistry 尚未就绪的情况。
+    /// 连续unavailableAfterMisses次实际采样没有支持的有效利用率字段后确认不可用；
+    /// 统计字典存在但缺利用率也算未命中，避免部分Intel机型永久停在等待状态。
+    /// 0%是有效读数；节流跳过的拍不改变此计数，后续恢复有效值会清除不可用状态。
     private(set) var unavailable = false
     private var misses = 0
     private let unavailableAfterMisses = 3
 
-    /// 本机是否**拿到了** GPU 计数器（= `unavailable` 的反面，含"数据还没到位"）。
-    ///
-    /// 宽度记账用的是这个、而不是 `snapshot.gpuUsage != nil`：**采集节流之后**
-    /// 跳过的那些拍会沿用上一次的 `utilization`，于是"这一拍没采"和"这一拍采了但没有值"
-    /// 在快照上看起来一样，`gpuUsage != nil` 就分不出来了。而 GPU 可用性一变，
-    /// 三档宽度必须重量 —— 漏掉就会一直用着缺 GPU 段时量到的偏小值（README.dev.md bug 6）。
+    /// 尚未被连续缺值确认不可用的能力提示，可能仍没有数值。
+    /// 状态栏不得用available || unavailable判断完整快照（该表达式恒真）；
+    /// 应按实际利用率段是否存在判断形状。节流跳采保留上一份数值及状态。
     var available: Bool { !unavailable }
 
+    /// 读支持的百分数字段。0是有效读数；缺字段、负值或非有限值不是已就绪。
+    static func readUtilization(from statistics: [String: Any]) -> Double? {
+        for key in ["Device Utilization %", "GPU Activity(%)", "Renderer Utilization %", "Tiler Utilization %"] {
+            guard let number = statistics[key] as? NSNumber else { continue }
+            let value = number.doubleValue
+            guard value.isFinite, value >= 0 else { continue }
+            return min(value, 100)
+        }
+        return nil
+    }
+
     func sample() {
-        // 无论从哪条路径离开都要更新「连续未命中」计数（含下面两个 early return）
-        var sawStatistics = false
+        // 未命中计数覆盖所有返回路径；仅支持的利用率字段读到有效值才算就绪。
+        var sawUtilization = false
         defer {
-            if sawStatistics {
+            if sawUtilization {
                 misses = 0
                 unavailable = false      // 一旦真的读到，就不再是「不可用」
             } else {
@@ -356,23 +441,13 @@ final class GPUMonitor {
                   let dictionary = properties?.takeRetainedValue() as? [String: Any],
                   let statistics = dictionary["PerformanceStatistics"] as? [String: Any] else { continue }
 
-            // 见到任何一个带 PerformanceStatistics 的 IOAccelerator，就说明
-            // 这台机器有 GPU 计数器（哪怕这一拍恰好没有可用的利用率字段）
-            sawStatistics = true
+            if let value = Self.readUtilization(from: statistics) {
+                sawUtilization = true
+                best = max(best ?? 0, value)
+            }
 
             if let count = dictionary["gpu-core-count"] as? Int {
                 bestCores = max(bestCores ?? 0, count)
-            }
-
-            for key in ["Device Utilization %", "GPU Activity(%)", "Renderer Utilization %", "Tiler Utilization %"] {
-                if let value = statistics[key] as? Int {
-                    best = max(best ?? 0, Double(value))
-                    break
-                }
-                if let value = statistics[key] as? Double {
-                    best = max(best ?? 0, value)
-                    break
-                }
             }
 
             for key in ["In use system memory", "Alloc system memory", "vramUsedBytes"] {
@@ -398,8 +473,21 @@ final class GPUMonitor {
 enum ProcessMonitor {
     static func count() -> Int {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
-        var size: size_t = 0
-        guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0 else { return 0 }
-        return size / MemoryLayout<kinfo_proc>.stride
+        // nil 缓冲查询返回的是预估容量（可能含预留槽），不是实际记录数。
+        // 查询和填充之间进程可能增长；重新查询最多三次，避免在主线程无限重试。
+        for _ in 0..<3 {
+            var size: size_t = 0
+            guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0 else { return 0 }
+            guard size > 0 else { return 0 }
+            let stride = MemoryLayout<kinfo_proc>.stride
+            var records = [kinfo_proc](repeating: kinfo_proc(), count: (size + stride - 1) / stride)
+            size = records.count * stride
+            let result = records.withUnsafeMutableBytes {
+                sysctl(&mib, u_int(mib.count), $0.baseAddress, &size, nil, 0)
+            }
+            if result == 0 { return size / stride }
+            guard errno == ENOMEM else { return 0 }
+        }
+        return 0
     }
 }
