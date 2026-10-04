@@ -1,8 +1,8 @@
 # 更新记录
 
-## 2026-10-04
+## v1.0.1（2026-10-04）
 
-本次源码更新修复了系统采样、菜单栏布局、自启和流光中的八项问题。
+本版本修复了系统采样、菜单栏布局、自启和流光中的八项问题，提供包含这些修复的通用 macOS 安装包。
 
 ### 修复
 
@@ -38,4 +38,4 @@ bash Tools/Regression/run.sh
 
 ### 获取修复
 
-本次更新已包含在源码中。已发布的 `v1.0.0` DMG 保持原有版本；使用本次修复请按 [README 的源码构建说明](<README.md#方式二从源码构建推荐给开发者>) 构建。
+下载 [SysPulse-1.0.1.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.0.1/SysPulse-1.0.1.dmg)，或按 [README 的源码构建说明](<README.md#方式二从源码构建推荐给开发者>) 构建。安装包与本版本源码一致，支持 Apple Silicon 与 Intel，要求 macOS 14.0 或更高版本。
