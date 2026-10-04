@@ -1,0 +1,89 @@
+name: Publish macOS release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build universal application
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/modulecache
+          for arch in arm64 x86_64; do
+            swiftc -O -wmo -swift-version 5 -warnings-as-errors \
+              -module-cache-path "$PWD/build/modulecache" \
+              -framework IOKit -framework AppKit -framework SwiftUI -framework ServiceManagement \
+              -target "${arch}-apple-macosx14.0" \
+              -o "build/SysPulse-${arch}" Sources/SysPulse/*.swift
+          done
+          lipo -create -output build/SysPulse build/SysPulse-arm64 build/SysPulse-x86_64
+          lipo -archs build/SysPulse
+          build/SysPulse --dump
+
+      - name: Package and verify DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import datetime, os, plistlib, shutil, subprocess
+          with Path('Resources/Info.plist').open('rb') as stream:
+              info = plistlib.load(stream)
+          version = info['CFBundleShortVersionString']
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + version, 'Tag and application version differ'
+          info['CFBundleVersion'] = subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], text=True).strip()
+          info['SysPulseBuildStamp'] = os.environ['GITHUB_SHA'][:7] + '@' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
+          app = Path('release/staging/SysPulse.app')
+          (app / 'Contents/MacOS').mkdir(parents=True)
+          (app / 'Contents/Resources').mkdir()
+          shutil.copy2('build/SysPulse', app / 'Contents/MacOS/SysPulse')
+          shutil.copy2('Resources/AppIcon.icns', app / 'Contents/Resources/AppIcon.icns')
+          with (app / 'Contents/Info.plist').open('wb') as stream:
+              plistlib.dump(info, stream)
+          Path('release/staging/Applications').symlink_to('/Applications', target_is_directory=True)
+          Path('release/version.txt').write_text(version)
+          notes = '# SysPulse v' + version + '\n\nmacOS 14.0+；通用安装包支持 Apple Silicon 与 Intel。应用采用 ad-hoc 签名，首次打开方式见 README。随包提供 SHA-256 校验文件。\n\n'
+          notes += Path('CHANGELOG.md').read_text().split('\n', 2)[2]
+          Path('release/notes.md').write_text(notes)
+          PY
+          codesign --force --deep --sign - release/staging/SysPulse.app
+          codesign --verify --all-architectures --deep --strict release/staging/SysPulse.app
+          VERSION="${GITHUB_REF_NAME#v}"
+          hdiutil create -volname "SysPulse ${VERSION}" -srcfolder release/staging \
+            -fs APFS -format UDZO "release/SysPulse-${VERSION}.dmg"
+          hdiutil verify "release/SysPulse-${VERSION}.dmg"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          version = Path('release/version.txt').read_text()
+          image = Path('release') / ('SysPulse-' + version + '.dmg')
+          image.with_suffix('.dmg.sha256').write_text(hashlib.sha256(image.read_bytes()).hexdigest() + '  ' + image.name + '\n')
+          PY
+
+      - name: Publish versioned installation package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "release/SysPulse-${VERSION}.dmg" "release/SysPulse-${VERSION}.dmg.sha256" \
+            --verify-tag --latest --title "SysPulse ${GITHUB_REF_NAME}" --notes-file release/notes.md
