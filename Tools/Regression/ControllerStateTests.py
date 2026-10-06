@@ -1,6 +1,7 @@
-"""Exercise the real GPU-width update/prime/adapt bodies with fake coordinates.
+"""Exercise real GPU-width and glass lifecycle bodies with fake coordinates.
 
 No NSStatusItem, real windows, installed app, or UserDefaults are created.
+The real glass view is instantiated only in a detached NSView container.
 The compiler also builds the full controller in run.sh's primary test phase;
 this separate phase supplies deterministic window geometry for its state pipeline.
 """
@@ -33,6 +34,7 @@ controller = (REPO / 'Sources/SysPulse/StatusItemController.swift').read_text()
 methods = [block(controller, signature) for signature in [
     '    static func gpuWidthState(',
     '    private func updateStatusItem(',
+    '    private func applyMenuBarImage(',
     '    private func primeDensityWidths(',
     '    private var ceilingIndex:',
     '    private var currentDensityIndex:',
@@ -43,9 +45,10 @@ metrics = block((REPO / 'Sources/SysPulse/Monitors.swift').read_text(), 'struct 
 (OUTPUT / 'MetricsSnapshot.swift').write_text('import Foundation\n' + metrics + '\n')
 scaffold = (HERE / 'ControllerScaffold.swift.in').read_text()
 checks = (HERE / 'ControllerChecks.swift.in').read_text()
-(OUTPUT / 'ControllerUnderTest.swift').write_text(scaffold + '\n'.join(methods) + '\n' + checks + '\n}\n')
-(OUTPUT / 'ExtractedMethods.swift.txt').write_text('\n'.join(methods))
-(OUTPUT / 'Entry.swift').write_text('@main struct Entry { static func main() { StatusItemController.runChecks() } }\n')
+glass_view = block(controller, 'private final class StatusItemGlassView: NSView')
+(OUTPUT / 'ControllerUnderTest.swift').write_text(scaffold + '\n'.join(methods) + '\n' + checks + '\n}\n' + glass_view + '\n')
+(OUTPUT / 'ExtractedMethods.swift.txt').write_text('\n'.join(methods) + '\n' + glass_view)
+(OUTPUT / 'Entry.swift').write_text('import Darwin\n@main struct Entry { static func main() { setbuf(stdout, nil); StatusItemController.runChecks() } }\n')
 
 subprocess.run([
     'swiftc', '-O', '-swift-version', '5', '-target', f'{platform.machine()}-apple-macosx14.0',

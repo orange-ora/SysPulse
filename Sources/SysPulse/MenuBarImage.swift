@@ -169,30 +169,36 @@ enum MenuBarImage {
             height: CGFloat(laidOut.count) * lineHeight + (CGFloat(laidOut.count) - 1) + spacing
         )
 
-        let draw = {
+        func draw(glyphMask: Bool = false) {
             for (rowIndex, items) in laidOut.enumerated() {
                 let offset = CGFloat(laidOut.count - 1 - rowIndex) * (lineHeight + 1)
                 for (segment, x) in items {
                     var attributes: [NSAttributedString.Key: Any] = [
                         .font: font(segment.weight),
-                        .foregroundColor: segment.color
+                        .foregroundColor: glyphMask ? NSColor.white : segment.color
                     ]
-                    if let textShadow { attributes[.shadow] = textShadow }
+                    if !glyphMask, let textShadow { attributes[.shadow] = textShadow }
                     NSAttributedString(string: segment.text, attributes: attributes)
                         .draw(at: NSPoint(x: horizontalPadding + x, y: offset + spacing / 2))
                 }
             }
         }
 
-        let image = NSImage(size: size, flipped: false) { _ in
-            if let appearance {
-                appearance.performAsCurrentDrawingAppearance {
-                    drawEffect(size: size, effect: effect, elapsed: effectElapsed)
-                    draw()
+        func drawContent() {
+            if effect == .iridescent {
+                drawIridescent(size: size, appearance: appearance, elapsed: effectElapsed) {
+                    draw(glyphMask: true)
                 }
             } else {
                 drawEffect(size: size, effect: effect, elapsed: effectElapsed)
                 draw()
+            }
+        }
+        let image = NSImage(size: size, flipped: false) { _ in
+            if let appearance {
+                appearance.performAsCurrentDrawingAppearance { drawContent() }
+            } else {
+                drawContent()
             }
             return true
         }
@@ -202,15 +208,17 @@ enum MenuBarImage {
 
     /// 背景动效总入口，按给定效果分发。
     ///
-    /// `elapsed` 为 nil = 不画（关闭，或这一帧不需要动效层）。两个效果共用经过时间
-    /// （`StatusItemController` 的定时器），各层独立换算角度。
+    /// `elapsed` 为 nil = 不画背景（关闭，或这一帧不需要动效层）。两个背景动效共用经过时间
+    /// （`StatusItemController` 的定时器），炫彩字面在 render 的独立透明层内绘制。
     ///
     /// ⚠️ **效果类型必须从参数传进来，不能读 `Preferences.shared`。**
     /// 一开始这里读的是全局单例，结果是：① 渲染函数不再可测（测试进程有自己的
     /// bundle id，读到的是它自己的默认值 `.off`，于是怎么渲都只有文字层）；
     /// ② 与同函数的 `density`（从参数传）不对称，埋一个"到底该信谁"的坑。
     static func drawEffect(size: NSSize, effect: MenuBarEffect, elapsed: Double?) {
-        guard let elapsed else { return }
+        guard let elapsed, elapsed.isFinite,
+              size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0 else { return }
         switch effect {
         case .off: return
         case .glow:
@@ -219,7 +227,74 @@ enum MenuBarImage {
             drawGlow(size: size, elapsed: elapsed)
         case .diffuse:
             drawDiffuse(size: size, elapsed: elapsed)
+        case .iridescent:
+            return // 原生按钮视图提供玻璃材质；图片只绘制透明字面。
         }
+    }
+
+    /// 五秒一轮的冷色珠光扫字；材质由菜单栏原生视图提供。
+    /// sourceIn/sourceAtop 仅作用于独立字形层，字形外保持透明。
+    private static func drawIridescent(size: NSSize, appearance: NSAppearance?,
+                                       elapsed: Double?, drawGlyphs: () -> Void) {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+              let cg = NSGraphicsContext.current?.cgContext else { return }
+        let dark = appearance?.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let palette: [NSColor] = dark ? [
+            NSColor(calibratedRed: 0.40, green: 0.70, blue: 1.00, alpha: 1),
+            NSColor(calibratedRed: 0.28, green: 0.91, blue: 0.84, alpha: 1),
+            NSColor(calibratedRed: 0.61, green: 0.58, blue: 1.00, alpha: 1),
+            NSColor(calibratedRed: 0.37, green: 0.77, blue: 1.00, alpha: 1)
+        ] : [
+            NSColor(calibratedRed: 0.12, green: 0.38, blue: 0.82, alpha: 1),
+            NSColor(calibratedRed: 0.05, green: 0.52, blue: 0.43, alpha: 1),
+            NSColor(calibratedRed: 0.38, green: 0.30, blue: 0.85, alpha: 1),
+            NSColor(calibratedRed: 0.08, green: 0.45, blue: 0.77, alpha: 1)
+        ]
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let base = CGGradient(colorsSpace: colorSpace,
+                                    colors: palette.map { $0.cgColor } as CFArray,
+                                    locations: [0, 0.30, 0.65, 1]) else { return }
+        let time = elapsed.flatMap { $0.isFinite ? $0 : nil } ?? 0
+        let phase = time.truncatingRemainder(dividingBy: 5) / 5
+        // 320 pt / 5 s：各档相同速度，80 pt 柔边带内包含 16 pt 明亮中心。
+        let tileWidth: CGFloat = 320
+        let shift = CGFloat(phase) * tileWidth
+        let startX = shift - tileWidth
+        let tiles = Int(ceil((size.width - startX) / tileWidth))
+        let span = CGFloat(tiles) * tileWidth
+        let peak = dark ? NSColor(calibratedRed: 0.90, green: 0.99, blue: 1, alpha: 1) :
+            NSColor(calibratedRed: 0.05, green: 0.45, blue: 1, alpha: 1)
+        let transparent = peak.withAlphaComponent(0)
+        var colors: [CGColor] = []
+        var locations: [CGFloat] = []
+        for tile in 0..<tiles {
+            let stops: [(CGFloat, NSColor)] = [
+                (0, transparent), (0.375, transparent),
+                (0.425, peak.withAlphaComponent(0.60)),
+                (0.475, peak), (0.525, peak),
+                (0.575, peak.withAlphaComponent(0.60)),
+                (0.625, transparent), (1, transparent)
+            ]
+            for (position, color) in stops where tile == 0 || position > 0 {
+                colors.append(color.cgColor)
+                locations.append((CGFloat(tile) + position) / CGFloat(tiles))
+            }
+        }
+        guard let shine = CGGradient(colorsSpace: colorSpace, colors: colors as CFArray,
+                                     locations: locations) else { return }
+        cg.saveGState()
+        cg.clip(to: CGRect(origin: .zero, size: size))
+        cg.beginTransparencyLayer(auxiliaryInfo: nil)
+        drawGlyphs()
+        cg.setBlendMode(.sourceIn)
+        cg.drawLinearGradient(base, start: .zero, end: CGPoint(x: size.width, y: 0),
+                              options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        cg.setBlendMode(.sourceAtop)
+        cg.drawLinearGradient(shine, start: CGPoint(x: startX, y: 0),
+                              end: CGPoint(x: startX + span, y: 0),
+                              options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        cg.endTransparencyLayer()
+        cg.restoreGState()
     }
 
     /// 流光与水波的时间基准；每个基准周期推进各自 turns / travel 个波长。

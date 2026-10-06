@@ -1,571 +1,646 @@
 import AppKit
 import SwiftUI
 
-/// 下拉面板：每项指标一张卡片，含实时数值、迷你曲线与进度条。
-struct DashboardView: View {
+// 当前 SDK 同时导出 State 宏；命令行 Swift 5 构建明确使用属性包装器。
+private typealias PanelState<Value> = SwiftUI.State<Value>
 
+/// 数据主视图与设置页共享同一层轻玻璃；所有采样和历史仍由 SystemMonitor 持有。
+enum DashboardPage { case overview, settings }
+enum DashboardDetail: String { case cpu = "CPU", gpu = "GPU", memory = "内存", network = "网络" }
+
+struct DashboardView: View {
     @ObservedObject var monitor: SystemMonitor
     @ObservedObject var preferences: Preferences
     @ObservedObject private var login = LaunchAtLogin.shared
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @PanelState private var page: DashboardPage
+    @PanelState private var selectedDetail: DashboardDetail?
 
-    /// 底部三个菜单里选了任一项之后调用，用来把整个面板收起来。
-    ///
-    /// 菜单（`NSMenu`）本身点完会自动关闭，但面板是独立的 `NSPopover`，不会跟着关；
-    /// 选了「1 秒」「单行」这种一次性设置后，面板留在屏幕上只会挡视线，所以这里主动收。
-    var onMenuSelection: () -> Void = {}
+    init(monitor: SystemMonitor, preferences: Preferences,
+         initialPage: DashboardPage = .overview, initialDetail: DashboardDetail? = nil) {
+        self.monitor = monitor
+        self.preferences = preferences
+        _page = State(initialValue: initialPage)
+        _selectedDetail = State(initialValue: initialDetail)
+    }
 
     private var snapshot: MetricsSnapshot { monitor.snapshot }
+    private var palette: PanelPalette {
+        PanelPalette(transparency: reduceTransparency ? 0 :
+            Preferences.normalizedPanelTransparency(preferences.panelTransparency))
+    }
 
-    /// 底部工具栏（刷新 / 排版 / 启动 / 退出）统一的字号。
-    /// 四者的图标与文字都由它派生 —— "调大一号"只改这一处，也不会再出现
-    /// 谁比谁粗、谁比谁大的不一致（2026-09-17 用户要求整体调大一号）。
-    private let toolbarFontSize: CGFloat = 13
+    private var transparency: Double {
+        Preferences.normalizedPanelTransparency(preferences.panelTransparency)
+    }
+    private var frostAmount: Double {
+        pow(max(0, (0.45 - transparency) / 0.45), 2)
+    }
+    private var usesClearGlass: Bool { transparency >= 0.65 }
 
     var body: some View {
-        VStack(spacing: 9) {
-            header
-
-            MetricCard(
-                icon: "cpu",
-                tint: .blue,
-                title: "CPU",
-                value: Format.percent(snapshot.cpuUsage),
-                progress: snapshot.cpuUsage,
-                history: monitor.cpuHistory,
-                upperBound: 1,
-                detail: "用户 \(Format.percent(snapshot.cpuUser)) · 系统 \(Format.percent(snapshot.cpuSystem)) · \(snapshot.cpuCores) 核"
-            )
-
-            MetricCard(
-                icon: "cube.transparent",
-                tint: .purple,
-                title: "GPU",
-                value: snapshot.gpuUsage.map { Format.percent($0 / 100) } ?? "--",
-                progress: (snapshot.gpuUsage ?? 0) / 100,
-                history: monitor.gpuHistory,
-                upperBound: 1,
-                detail: gpuDetail
-            )
-
-            MetricCard(
-                icon: "memorychip",
-                tint: .green,
-                title: "内存",
-                value: Format.percent(snapshot.memoryFraction),
-                progress: snapshot.memoryFraction,
-                history: monitor.memoryHistory,
-                upperBound: 1,
-                detail: memoryDetail
-            )
-
-            NetworkCard(
-                down: snapshot.downSpeed,
-                up: snapshot.upSpeed,
-                downHistory: monitor.downHistory,
-                upHistory: monitor.upHistory,
-                totalDown: snapshot.totalDown,
-                totalUp: snapshot.totalUp
-            )
-
-            metricToggles
-            footer
-        }
-        .padding(13)
-        .frame(width: 342)
-    }
-
-    /// 显示项开关行。
-    ///
-    /// 这四个开关原来放在「显示项」菜单里，但 macOS 上 SwiftUI 的菜单项点一次就会收起
-    /// （`menuActionDismissBehavior(.disabled)` 被标记为 `@available(macOS, unavailable)`），
-    /// 没法连续勾选。所以挪到面板上做成小开关，可以随手连点。
-    private var metricToggles: some View {
-        // 和上面的卡片同构：第一行是「图标 + 标题」，第二行才是内容（四个开关）。
-        // 徽章统一 20pt、行距 7pt，标题行才能和 CPU / GPU / 内存 / 网络 的标题严格对齐，
-        // 四张卡片连起来看是一条线；开关行单独留 12pt，和标题拉开层次。
-        // 徽章用紫色而不是灰色：灰色徽章看着像「未启用」的占位，紫色是显示项的小开关
-        // 自己的识别色（绿色留给选中勾，黄色 / 橙色是压力色，都不适合当常驻配色）。
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 7) {
-                IconBadge(symbol: "slider.horizontal.3", tint: .purple, size: 20, iconSize: 10.5)
-                Text("显示项")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
+        Group {
+            if #available(macOS 26.0, *), !reduceTransparency {
+                content
+                    .background {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(.thickMaterial)
+                            .opacity(frostAmount * 0.85)
+                    }
+                    .glassEffect(
+                        usesClearGlass ? Glass.clear : Glass.regular,
+                        in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    )
+            } else {
+                content
+                    .background {
+                        PanelMaterial()
+                            .overlay {
+                                palette.surface.opacity(reduceTransparency ? 1 :
+                                    0.22 * (1 - transparency))
+                            }
+                            .allowsHitTesting(false)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             }
+        }
+        .environment(\.colorScheme, .light)
+        .preferredColorScheme(.light)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: usesClearGlass)
+    }
 
-            HStack(spacing: 8) {
-                toggleChip("网速", isOn: preferences.showNetwork) { preferences.showNetwork.toggle() }
-                toggleChip("CPU", isOn: preferences.showCPU) { preferences.showCPU.toggle() }
-                // GPU 排在内存前面：与上方 CPU / GPU / 内存 三张卡片的顺序、以及菜单栏读数里
-                // `CPU … GPU … MEM …` 的顺序一致（2026-09-16 按需求把这两项调了个位置）。
-                toggleChip("GPU", isOn: preferences.showGPU) { preferences.showGPU.toggle() }
-                toggleChip("内存", isOn: preferences.showMemory) { preferences.showMemory.toggle() }
-                effectChip()
+    private var content: some View {
+        VStack(spacing: 0) {
+            if page == .overview {
+                overview.transition(.opacity)
+            } else {
+                settings.modifier(PanelReadingPlate(palette: palette)).transition(.opacity)
             }
-            .padding(.top, 5)   // 标题行 7pt + 这里 5pt = 12pt，比卡片内「标题 / 进度条」再松一点
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(0.055))
-        )
+        .padding(14)
+        .frame(width: 360)
+        .foregroundStyle(palette.primary)
+        .tint(palette.accent)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: page)
     }
 
-    /// 一个小开关。
-    ///
-    /// 三个排版细节：
-    /// - 勾位用固定宽度的容器占宽，勾出现 / 消失时标签不会左右移动；
-    /// - 五个开关（网速 / CPU / GPU / 内存 / 流光）等宽铺满卡片（`maxWidth: .infinity` 均分），
-    ///   右侧不留缺口，也就和上面卡片里的进度条一样顶到同一条边缘；
-    /// - 关掉时标签用 `.secondary`、底色几乎只剩描边，一眼能分出开 / 关。
-    private func toggleChip(_ title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(isOn ? Color.green : Color.clear)
-                    .frame(width: 9, height: 9)
-                Text(title).font(.system(size: 10.5, weight: isOn ? .medium : .regular))
+    private var overview: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header.modifier(PanelReadingPlate(palette: palette))
+            metricGrid
+            if let detail = selectedDetail {
+                detailPanel(detail)
             }
-            .foregroundStyle(isOn ? Color.primary : Color.secondary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
-            .background(
-                Capsule().fill(isOn ? Color.green.opacity(0.16) : Color.primary.opacity(0.06))
-            )
-            .overlay(
-                // 细描边：关掉的开关在浅色面板上不至于糊成一片
-                Capsule().stroke(
-                    isOn ? Color.green.opacity(0.30) : Color.primary.opacity(0.10),
-                    lineWidth: 0.5
-                )
-            )
-            .contentShape(Capsule())
+            deviceInformationPanel
+            metricToggles.modifier(PanelReadingPlate(palette: palette))
+            menuBarEffects.modifier(PanelReadingPlate(palette: palette)).padding(.top, 6)
+            separator
+            footer.modifier(PanelReadingPlate(palette: palette))
         }
-        .buttonStyle(.plain)
     }
-
-    /// 背景动效选择：一个和 `toggleChip` 同尺寸的胶囊，点开是「关闭 / 流光 / 漫散射」三选一。
-    ///
-    /// **为什么不是又一个开关**：两个效果是互斥的（同时开会互相干扰、观感更乱），
-    /// 做成两个独立开关就会出现"两个都亮着"的歧义状态；做成单值枚举就不会。
-    ///
-    /// 未选中（关闭）时用 `eye.slash` 而不是 `checkmark`，因为这一项和左边四个
-    /// "开/关"型开关语义不同 —— 它是三态，用眼睛图标一眼能看出"当前没有背景动效"。
-    ///
-    /// ⚠️ **这个胶囊的外观是一张整图，不是 SwiftUI 视图**（原因见 `effectChipImage`）。
-    /// 开启时是**橙色圆角圈 + 橙色星星 + 白字 + 中性底**（底色不带颜色，见 `effectChipImage`）；
-    /// 关闭时是灰圈 + 灰眼睛 + 灰字。
-    /// 左边四个开关的绿胶囊是另一套视图（`toggleChip`），**两者互不影响**。
-    ///
-    /// 把 SF Symbol 染成指定颜色，返回**非模板**图片（`isTemplate = false`）。
-    ///
-    /// ⚠️ `color` 必须是**不透明**颜色，别传 `.clear` 想表达"不染色"：这里靠
-    /// `sourceAtop` 铺色，而 `sourceAtop` 的结果是 `S·Da + D·(1−Sa)`，源 alpha 为 0 时
-    /// 结果**恒等于原图**（不是变透明），于是符号保留 SF Symbol 的默认黑。
-    /// 2026-10-01 实测踩过：关闭态传 `.clear`，深色面板上量到 `(0,0,0)`、191 个近黑像素的眼睛。
-    private static func tintedSymbol(_ name: String, color: NSColor, pointSize: CGFloat) -> NSImage? {
-        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .bold)
-        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config) else { return nil }
-        let out = NSImage(size: base.size)
-        out.lockFocus()
-        base.draw(in: NSRect(origin: .zero, size: base.size))
-        color.set()
-        NSRect(origin: .zero, size: base.size).fill(using: .sourceAtop)
-        out.unlockFocus()
-        out.isTemplate = false
-        return out
-    }
-
-    /// 把整个效果胶囊（圆角圈 + 星星 + 文字）画成**一张非模板图片**。
-    ///
-    /// ⚠️ **为什么必须整块画成图片**（2026-10-01 逐项实测，别往回改）：
-    /// 这个胶囊用 `.menuStyle(.borderlessButton)`，系统会把标签**扁平化**：
-    ///   · `.foregroundStyle(.green)` → 无效（图标/文字都被渲染成系统前景色）
-    ///   · `.background(Capsule().fill(Color…))` → **整块丢掉**
-    ///     （面板上量到 `(59,59,62)` 对底色 `(59,59,61)`，只有 1/255 的差别）
-    ///   · `.background(Image(nsImage: 非模板胶囊))` → 同样丢掉
-    ///   · 把胶囊放进内容做 ZStack 兄弟 → 画出来了，但**布局错乱**（胶囊与文字并排）
-    /// 唯一稳定的是**内容里的非模板图片按自身像素绘制**，所以整块画成一张图。
-    /// ⚠️ 用 `NSImage(size:flipped:drawingHandler:)` 而不是 `lockFocus`：
-    /// 前者按目标缩放**重新光栅化**，2x 屏上文字才清晰（与状态栏图片同一套做法）。
-    private static func effectChipImage(title: String, isOn: Bool, tint: NSColor,
-                                        isDark: Bool) -> NSImage {
-        // ⚠️ 这张图里**一律不用语义色**（`secondaryLabelColor` 之类）。两个实测原因：
-        //   ① 离屏上下文的外观不跟随面板（`NSColor.labelColor` 会解析成黑，见 `isDarkAppearance`）；
-        //   ② 语义色**自带 alpha**，`withAlphaComponent()` 与它**相乘**：实测
-        //      `secondaryLabelColor.withAlphaComponent(0.10)` 铺出来只比面板底色高 **6 个灰阶**
-        //      （约 5% 白），底板等于没有 —— 2026-10-01 在真机面板上量到。
-        // 改成按 `isDark` 显式给「白 / 黑 + alpha」：底板 Δ+12~16、灰圈 Δ+50，清清楚楚。
-        let neutral = isDark ? NSColor.white : NSColor.black
-        let plate = neutral.withAlphaComponent(0.10)        // 中性地板，与左边开关同档（primary 0.06~0.16）
-        let ringOff = neutral.withAlphaComponent(0.22)      // 关闭态灰圈
-        let inkOff = NSColor(white: isDark ? 0.72 : 0.38, alpha: 1)   // 关闭态灰字 / 灰眼睛
-
-        let font = NSFont.systemFont(ofSize: 10.5, weight: isOn ? .semibold : .regular)
-        let iconSide: CGFloat = 11
-        let hPad: CGFloat = 8, vPad: CGFloat = 4, gap: CGFloat = 4
-        let attributed = NSAttributedString(string: title, attributes: [
-            .font: font,
-            // 文字按用户要求保持白字（浅色面板上转黑字）。
-            // ⚠️ 必须显式给色：`NSAttributedString.draw` 在离屏上下文里没有默认前景色，
-            // 不给就是**纯黑**（实测踩过：深色面板上文字直接消失）。
-            // ⚠️ 也不能用 `NSColor.labelColor` —— 离屏上下文的外观不跟随面板，
-            // 解析出来同样是黑的。所以外观由调用方按 `NSApp` 实际外观显式传进来。
-            .foregroundColor: isOn ? (isDark ? NSColor.white : NSColor.black) : inkOff
-        ])
-        let textSize = attributed.size()
-        let size = NSSize(width: hPad * 2 + iconSide + gap + ceil(textSize.width),
-                          height: vPad * 2 + max(iconSide, ceil(textSize.height)))
-        // ⚠️ 关闭态的图标要显式给灰（不能传 `.clear`，见 `tintedSymbol` 的说明）
-        let icon = tintedSymbol(isOn ? "sparkles" : "eye.slash",
-                                color: isOn ? tint : inkOff, pointSize: 9)
-        let image = NSImage(size: size, flipped: false) { _ in
-            // 圆角圈：**橙色描边 + 不带颜色的中性底**。
-            // ⚠️ 底色曾经是 `tint.withAlphaComponent(0.16)`（淡橙），用户 2026-10-01 要求
-            // **底色不要用橙色、干脆不用颜色**：描边和星星保持橙色，只有内部这层地板改成中性。
-            let rect = NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
-            let path = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
-            plate.setFill()
-            path.fill()
-            (isOn ? tint.withAlphaComponent(0.75) : ringOff).setStroke()
-            path.lineWidth = 1
-            path.stroke()
-            if let icon {
-                icon.draw(at: NSPoint(x: hPad, y: (size.height - icon.size.height) / 2),
-                          from: .zero, operation: .sourceOver, fraction: 1)
-            }
-            attributed.draw(at: NSPoint(x: hPad + iconSide + gap,
-                                        y: (size.height - textSize.height) / 2))
-            return true
-        }
-        image.isTemplate = false
-        return image
-    }
-
-    /// 当前是不是深色外观。
-    ///
-    /// ⚠️ **不能用 SwiftUI 的 `@Environment(\.colorScheme)`** —— 实测它在面板这个
-    /// popover 里报 **light**（面板实际是深色），于是白字被画成黑字、压在深色面板上
-    /// 等于没字。也不能用 `NSColor.labelColor`：离屏绘制上下文的外观同样不跟随面板，
-    /// 解析出来也是黑的。直接问 App 的实际外观最可靠。
-    private static var isDarkAppearance: Bool {
-        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    }
-
-    private func effectChip() -> some View {
-        let effect = preferences.menuBarEffect
-        let isOn = effect != .off
-        return Menu {
-            ForEach(MenuBarEffect.allCases, id: \.self) { option in
-                Button {
-                    preferences.menuBarEffect = option
-                } label: {
-                    menuRow(option.title, isOn: option == effect)
-                }
-            }
-        } label: {
-            Image(nsImage: Self.effectChipImage(title: effect.title, isOn: isOn,
-                                                tint: .systemOrange,
-                                                isDark: Self.isDarkAppearance))
-                .accessibilityLabel(effect.title)
-        }
-        // `.borderlessButton` 会忽略 `.foregroundStyle`（标签由系统按菜单样式渲染），
-        // 于是关闭态下会和左边四个开关的"灰"不一致 —— 所以只靠文字/图标本身表达状态，
-        // 颜色交给系统，这样在浅色面板上也不会发灰。
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-    }
-
-    /// 菜单项：选中时在文字前加一个**绿色**勾。
-    ///
-    /// 系统的勾是单色模板图（`Toggle` 和 `Label(_:systemImage:)` 都无法改色），
-    /// 所以这里用富文本前缀自己画：绿色 ✓ + 正常的标题颜色。
-    private func menuRow(_ title: String, isOn: Bool) -> Text {
-        // 勾占的宽度是固定的：选中画绿色勾，未选中用 5 个空格占位
-        // （实测「✓  」18.34pt vs 5 空格 17.90pt，差 0.44pt，肉眼无感），
-        // 这样所有标题都在同一列对齐，未选中项也看不到任何痕迹。
-        // 标题不指定颜色：交给菜单按浅色/深色背景决定，写死 .primary 在浅色菜单上会发灰。
-        var head = AttributedString(isOn ? "✓  " : "     ")
-        if isOn { head.foregroundColor = .green }
-        return Text(head) + Text(title)
-    }
-
-    /// GPU 卡片副标题：核心数 + 正在使用的统一内存
-    private var gpuDetail: String {
-        var parts: [String] = []
-        if let cores = snapshot.gpuCores { parts.append("\(cores) 核") }
-        if let memory = snapshot.gpuMemory { parts.append("GPU 内存 \(Format.bytes(memory))") }
-        return parts.isEmpty ? "该机型未暴露 GPU 计数器" : parts.joined(separator: " · ")
-    }
-
-    private var memoryDetail: String {
-        var text = "已用 \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal))"
-        if snapshot.swapUsed > 0 {
-            text += " · 交换 \(Format.bytes(snapshot.swapUsed))"
-        }
-        return text
-    }
-
-    // MARK: - 头部 / 尾部
 
     private var header: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "waveform.path.ecg")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(Color.accentColor)
-            Text("SysPulse")
-                .font(.system(size: 12.5, weight: .bold))
-            Spacer(minLength: 8)
-            Text("已运行 \(Format.uptime(snapshot.uptime))")
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 7) {
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(palette.accent)
+                Text("SysPulse")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer(minLength: 8)
+                Button { page = .settings } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .regular))
+                        .frame(width: 26, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PanelPressButtonStyle())
+                .foregroundStyle(palette.secondary)
+                .help("显示与外观")
+                .accessibilityLabel("打开显示与外观设置")
+                .accessibilityIdentifier("panel.settings")
+            }
+            Text("系统运行 \(Format.uptime(snapshot.uptime)) · \(snapshot.processCount) 进程")
                 .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-            Text("· \(snapshot.processCount) 进程")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+                .foregroundStyle(palette.secondary)
         }
-        .padding(.horizontal, 2)
-        .padding(.bottom, 1)
     }
 
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Divider().padding(.vertical, 1)
-
-            HStack(spacing: 6) {
-                Menu {
-                    ForEach([0.5, 1.0, 2.0, 5.0], id: \.self) { interval in
-                        Button {
-                            preferences.refreshInterval = interval
-                            onMenuSelection()
-                        } label: {
-                            menuRow(intervalTitle(interval), isOn: abs(preferences.refreshInterval - interval) < 0.01)
-                        }
-                    }
-                } label: {
-                    Label("刷新", systemImage: "clock").font(.system(size: toolbarFontSize))
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-
-                Menu {
-                    ForEach(MenuBarLayout.allCases, id: \.self) { layout in
-                        let title = layout.detail.map { "\(layout.title) · \($0)" } ?? layout.title
-                        Button {
-                            preferences.menuBarLayout = layout
-                            onMenuSelection()
-                        } label: {
-                            menuRow(title, isOn: preferences.menuBarLayout == layout)
-                        }
-                    }
-                } label: {
-                    Label("排版", systemImage: "rectangle.split.3x1").font(.system(size: toolbarFontSize))
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-
-                Menu {
-                    Button {
-                        login.set(!login.isEnabled)
-                        onMenuSelection()
-                    } label: {
-                        menuRow("开机自动启动", isOn: login.isEnabled)
-                    }
-                } label: {
-                    Label("启动", systemImage: "power.circle").font(.system(size: toolbarFontSize))
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-
-                Spacer(minLength: 4)
-
-                Button {
-                    NSApp.terminate(nil)
-                } label: {
-                    // 字重 / 颜色对齐左边那三个菜单：`Menu` 的标签由
-                    // `.menuStyle(.borderlessButton)` 渲染（偏粗 + 主色），
-                    // 而 `.borderless` 的普通按钮标签更轻更淡，并排看会像两种样式。
-                    // 图标与文字**分开设样式**：左边那三个菜单的图标（时钟 / 分栏 / 电源）
-                    // 本身是细轮廓，而 `xmark.circle` 里的叉天生更粗 —— 不单独压一下，
-                    // 即使文字对齐了，图标还是会显得比它们重（用户："太丑了"）。
-                    HStack(spacing: 4) {
-                        Image(systemName: "xmark.circle")
-                            .font(.system(size: toolbarFontSize, weight: .regular))
-                        Text("退出")
-                            .font(.system(size: toolbarFontSize, weight: .medium))
-                    }
-                    // 退出是"破坏性"操作，用橙色和左边三个设置项区分开（2026-09-17 按需求改）
-                    .foregroundStyle(Color.orange)
-                }
-                .buttonStyle(.borderless)
+    private var metricGrid: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                metricTile(.cpu, icon: "cpu", fraction: snapshot.cpuUsage,
+                           detail: "用户 \(Format.percent(snapshot.cpuUser)) · 系统 \(Format.percent(snapshot.cpuSystem))",
+                           history: monitor.cpuHistory)
+                metricTile(.gpu, icon: "display", fraction: snapshot.gpuUsage.map { $0 / 100 },
+                           detail: gpuSubtitle, history: monitor.gpuHistory)
             }
-
-            if let message = login.errorMessage {
-                Text(message)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
+            HStack(spacing: 8) {
+                metricTile(.memory, icon: "memorychip", fraction: snapshot.memoryFraction,
+                           detail: "\(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal))",
+                           history: monitor.memoryHistory)
+                networkTile
             }
         }
-        .onChange(of: preferences.refreshInterval) { _, _ in
-            monitor.restartTimer()
+    }
+
+    private func metricTile(_ kind: DashboardDetail, icon: String, fraction: Double?,
+                            detail: String, history: [Double]) -> some View {
+        Button { toggleDetail(kind) } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                tileHeading(kind.rawValue, icon: icon, color: palette.metricTint(kind))
+                Text(fraction.map { Format.percent($0) } ?? "--")
+                    .font(.system(size: 28, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(fraction.map { palette.metricColor($0) } ?? palette.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(detail)
+                    .font(.system(size: 10.5))
+                    .monospacedDigit()
+                    .foregroundStyle(palette.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 0)
+                Sparkline(series: [history], colors: [palette.metricTint(kind)], upperBound: 1)
+                    .frame(height: 30)
+                    .accessibilityHidden(true)
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity)
+            .frame(height: 136)
+            .background(tileBackground(kind, selected: selectedDetail == kind))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(PanelPressButtonStyle())
+        .help(detailDescription(kind))
+        .accessibilityLabel("\(kind.rawValue)，\(fraction.map { Format.percent($0) } ?? "尚未就绪")，\(detail)")
+        .accessibilityHint("展开详细信息")
+        .accessibilityIdentifier("panel.metric.\(kind)")
+    }
+
+    private var networkTile: some View {
+        Button { toggleDetail(.network) } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                tileHeading("网络", icon: "arrow.up.arrow.down", color: palette.metricTint(.network))
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(palette.metricTint(.network))
+                    Text(Format.speed(snapshot.downSpeed))
+                        .font(.system(size: 21, weight: .medium))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                }
+                .frame(height: 34, alignment: .leading)
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up")
+                    Text(Format.speed(snapshot.upSpeed)).monospacedDigit()
+                }
+                .font(.system(size: 10.5))
+                .foregroundStyle(palette.secondary)
+                .lineLimit(1)
+                Spacer(minLength: 0)
+                Sparkline(series: [monitor.downHistory, monitor.upHistory],
+                          colors: [palette.metricTint(.network), palette.metricTint(.network).opacity(0.65)], upperBound: nil)
+                    .frame(height: 30)
+                    .accessibilityHidden(true)
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity)
+            .frame(height: 136)
+            .background(tileBackground(.network, selected: selectedDetail == .network))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(PanelPressButtonStyle())
+        .help(detailDescription(.network))
+        .accessibilityLabel("网络，下载 \(Format.speed(snapshot.downSpeed))，上传 \(Format.speed(snapshot.upSpeed))")
+        .accessibilityHint("展开本次运行累计流量")
+        .accessibilityIdentifier("panel.metric.network")
+    }
+
+    private func tileHeading(_ title: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.system(size: 11.5, weight: .medium))
+            Text(title).font(.system(size: 12, weight: .medium))
+        }
+        .foregroundStyle(color)
+    }
+
+    private func tileBackground(_ kind: DashboardDetail, selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(palette.tile)
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(palette.metricTint(kind).opacity(selected ? 0.10 : 0.055))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(selected ? palette.metricTint(kind).opacity(0.45) : palette.tileBorder,
+                                  lineWidth: selected ? 1 : 0.5)
+            }
+    }
+
+    private func toggleDetail(_ detail: DashboardDetail) {
+        selectedDetail = selectedDetail == detail ? nil : detail
+    }
+
+    private var gpuSubtitle: String {
+        if snapshot.gpuUsage == nil {
+            return snapshot.gpuUnavailable ? "该机型未提供计数器" : "等待 GPU 数据"
+        }
+        var parts: [String] = []
+        if let cores = snapshot.gpuCores { parts.append("\(cores) 核") }
+        if let memory = snapshot.gpuMemory { parts.append(Format.bytes(memory)) }
+        return parts.isEmpty ? "实时利用率" : parts.joined(separator: " · ")
+    }
+
+    private func detailDescription(_ kind: DashboardDetail) -> String {
+        switch kind {
+        case .cpu:
+            return "用户 \(Format.percent(snapshot.cpuUser)) · 系统 \(Format.percent(snapshot.cpuSystem)) · \(snapshot.cpuCores) 核"
+        case .gpu:
+            var parts: [String] = []
+            if snapshot.gpuUsage == nil { parts.append(gpuSubtitle) }
+            if let cores = snapshot.gpuCores { parts.append("\(cores) 核") }
+            if let memory = snapshot.gpuMemory { parts.append("GPU 内存 \(Format.bytes(memory))") }
+            return parts.isEmpty ? "实时利用率" : parts.joined(separator: " · ")
+        case .memory:
+            return "已用 \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal)) · 交换 \(Format.bytes(snapshot.swapUsed))"
+        case .network:
+            return "本次运行接收 \(Format.bytes(snapshot.totalDown)) · 发送 \(Format.bytes(snapshot.totalUp))"
+        }
+    }
+
+    private func detailPanel(_ kind: DashboardDetail) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("\(kind.rawValue) 明细")
+                    .font(.system(size: 10.5, weight: .medium))
+                Text(detailDescription(kind))
+                    .font(.system(size: 10.5))
+                    .monospacedDigit()
+                    .foregroundStyle(palette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Button { selectedDetail = nil } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .medium))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(PanelPressButtonStyle())
+            .foregroundStyle(palette.secondary)
+            .accessibilityLabel("收起明细")
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tileBackground(kind, selected: false))
+    }
+
+    private var deviceInformationPanel: some View {
+        let device = monitor.deviceInformation
+        var processorParts = [device.processorName]
+        if snapshot.cpuCores > 0 { processorParts.append("\(snapshot.cpuCores) 核 CPU") }
+        if let cores = snapshot.gpuCores { processorParts.append("\(cores) 核 GPU") }
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: device.modelName.localizedCaseInsensitiveContains("book") ? "laptopcomputer" : "desktopcomputer")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(palette.secondary)
+                .frame(width: 17)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(device.modelName)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(palette.primary)
+                Text(processorParts.filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(palette.secondary)
+                Text(device.memoryDescription)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(palette.secondary)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(palette.tile))
+        .help("设备标识：\(device.modelIdentifier)")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("设备信息，\(device.modelName)，\(processorParts.joined(separator: "，"))，\(device.memoryDescription)")
+        .accessibilityIdentifier("panel.device")
+    }
+
+    private var metricToggles: some View {
+        HStack(spacing: 3) {
+            Text("菜单栏")
+                .font(.system(size: 11))
+                .foregroundStyle(palette.secondary)
+                .frame(width: 36, alignment: .leading)
+            metricToggle("网速", key: "network", isOn: $preferences.showNetwork)
+            metricToggle("CPU", key: "cpu", isOn: $preferences.showCPU)
+            metricToggle("GPU", key: "gpu", isOn: $preferences.showGPU)
+            metricToggle("内存", key: "memory", isOn: $preferences.showMemory)
+        }
+        .padding(.top, 1)
+    }
+
+    private func controlBackground(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(selected ? palette.controlGreen.opacity(0.28) : palette.tile)
+    }
+
+    private func metricToggle(_ title: String, key: String, isOn: Binding<Bool>) -> some View {
+        Button { isOn.wrappedValue.toggle() } label: {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(isOn.wrappedValue ? palette.controlGreen : Color.clear)
+                    .overlay(Circle().strokeBorder(isOn.wrappedValue ? Color.clear : palette.secondary, lineWidth: 1))
+                    .frame(width: 5, height: 5)
+                Text(title).font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(isOn.wrappedValue ? palette.controlGreenText : palette.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(controlBackground(selected: isOn.wrappedValue))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PanelPressButtonStyle())
+        .accessibilityLabel("菜单栏显示\(title)")
+        .accessibilityValue(isOn.wrappedValue ? "开启" : "关闭")
+        .accessibilityIdentifier("panel.toggle.\(key)")
+        .help("在菜单栏\(isOn.wrappedValue ? "隐藏" : "显示")\(title)")
+    }
+
+    private var menuBarEffects: some View {
+        HStack(spacing: 3) {
+            Text("光　效")
+                .font(.system(size: 11))
+                .foregroundStyle(palette.secondary)
+                .frame(width: 36, alignment: .leading)
+            PanelSegmentedControl(selection: $preferences.menuBarEffect,
+                options: MenuBarEffect.allCases.map { ($0, $0.title) },
+                label: "菜单栏光效", palette: palette,
+                optionHelp: { effect in
+                    effect == .iridescent ? "清透玻璃衬托冷色文字，加亮珠光沿字形扫过" : effect.title
+                },
+                optionIdentifier: { "panel.effect.\($0.rawValue)" })
+        }
+    }
+
+    private var separator: some View { palette.divider.frame(height: 0.5) }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Button { page = .settings } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 10.5))
+                    Text("\(intervalTitle(preferences.refreshInterval))刷新 · \(layoutTitle(preferences.menuBarLayout))排版")
+                        .font(.system(size: 11))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PanelPressButtonStyle())
+            .foregroundStyle(palette.secondary)
+            .accessibilityLabel("调整刷新频率和排版")
+            Spacer(minLength: 8)
+            Button { NSApp.terminate(nil) } label: {
+                Label("退出", systemImage: "power")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(PanelPressButtonStyle())
+            .foregroundStyle(palette.warning)
+        }
+    }
+
+    private var settings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 7) {
+                Button { page = .overview } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 23, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PanelPressButtonStyle())
+                .foregroundStyle(palette.secondary)
+                .accessibilityLabel("返回指标面板")
+                .accessibilityIdentifier("panel.back")
+                Text("显示与外观").font(.system(size: 14, weight: .semibold))
+                Spacer()
+            }
+
+            settingSection("刷新频率") {
+                PanelSegmentedControl(selection: $preferences.refreshInterval,
+                    options: [(0.5, "0.5 秒"), (1.0, "1 秒"), (2.0, "2 秒"), (5.0, "5 秒")],
+                    label: "刷新频率", palette: palette)
+            }
+            settingSection("菜单栏排版") {
+                PanelSegmentedControl(selection: $preferences.menuBarLayout,
+                    options: [(.auto, "自动"), (.full, "单行"), (.compact, "双行"), (.minimal, "极简")],
+                    label: "菜单栏排版", palette: palette)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("玻璃通透")
+                    Spacer()
+                    Text("\(Int((transparency * 100).rounded()))%")
+                        .monospacedDigit()
+                        .foregroundStyle(palette.primary)
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(palette.secondary)
+                Slider(value: $preferences.panelTransparency, in: 0...1, step: 0.01)
+                    .accessibilityLabel("玻璃通透")
+                    .accessibilityValue("\(Int((transparency * 100).rounded()))%")
+                    .accessibilityIdentifier("panel.transparency")
+                    .disabled(reduceTransparency)
+                HStack {
+                    Text("厚磨砂")
+                    Spacer()
+                    Text("清透玻璃")
+                }
+                .font(.system(size: 10.5))
+                .foregroundStyle(palette.secondary)
+                Text(reduceTransparency ? "系统已开启减少透明度，面板使用实色背景。" : "从柔雾到透亮，读数保持清晰")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(palette.secondary)
+            }
+            separator
+            VStack(alignment: .leading, spacing: 7) {
+                Toggle("开机启动", isOn: Binding(get: { login.isEnabled }, set: { login.set($0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .font(.system(size: 11))
+                    .accessibilityIdentifier("panel.login")
+                if let message = login.errorMessage {
+                    Text(message)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Button { preferences.resetDisplaySettings() } label: {
+                Text("恢复显示默认值")
+                    .font(.system(size: 11))
+                    .foregroundStyle(palette.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(palette.tile))
+            }
+            .buttonStyle(PanelPressButtonStyle())
+            .help("恢复显示项、刷新频率、排版、菜单栏效果和通透度；保留开机启动设置")
+        }
+    }
+
+    private func settingSection<Content: View>(_ title: String,
+                                               @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.system(size: 11)).foregroundStyle(palette.secondary)
+            content()
         }
     }
 
     private func intervalTitle(_ interval: Double) -> String {
-        switch interval {
-        case ..<0.75: return "0.5 秒"
-        case ..<1.5: return "1 秒"
-        case ..<3: return "2 秒"
-        default: return "5 秒"
+        String(format: interval == interval.rounded() ? "%.0f 秒" : "%.1f 秒", interval)
+    }
+
+    private func layoutTitle(_ layout: MenuBarLayout) -> String {
+        switch layout {
+        case .auto: return "自动"
+        case .full: return "单行"
+        case .compact: return "双行"
+        case .minimal: return "极简"
         }
     }
 }
 
-// MARK: - 卡片
+/// 中性清透磨砂；四项指标分别使用青绿、紫罗兰、赭金与湖蓝。
+private struct PanelPalette {
+    let transparency: Double
+    var surface: Color { Color(red: 235 / 255, green: 238 / 255, blue: 240 / 255) }
+    var softWhite: Color { Color(red: 245 / 255, green: 247 / 255, blue: 249 / 255) }
+    var primary: Color { Color(red: 54 / 255, green: 51 / 255, blue: 47 / 255) }
+    var secondary: Color { Color(red: 119 / 255, green: 107 / 255, blue: 93 / 255) }
+    var accent: Color { Color(red: 179 / 255, green: 128 / 255, blue: 67 / 255) }
+    var selectedText: Color { Color(red: 133 / 255, green: 83 / 255, blue: 33 / 255) }
+    var controlGreen: Color { Color(red: 55 / 255, green: 203 / 255, blue: 105 / 255) }
+    var controlGreenText: Color { Color(red: 29 / 255, green: 112 / 255, blue: 60 / 255) }
+    var warning: Color { Color(red: 165 / 255, green: 99 / 255, blue: 25 / 255) }
+    var critical: Color { Color(red: 181 / 255, green: 57 / 255, blue: 47 / 255) }
+    var readingPlate: Color { softWhite.opacity(0.60 * pow(transparency, 4)) }
+    var tile: Color { softWhite.opacity(0.36 + 0.28 * transparency) }
+    var tileBorder: Color { Color.white.opacity(0.36) }
+    var divider: Color { selectedText.opacity(0.14) }
+    func metricTint(_ kind: DashboardDetail) -> Color {
+        switch kind {
+        case .cpu: return Color(red: 51 / 255, green: 127 / 255, blue: 111 / 255)
+        case .gpu: return Color(red: 126 / 255, green: 99 / 255, blue: 165 / 255)
+        case .memory: return Color(red: 166 / 255, green: 120 / 255, blue: 47 / 255)
+        case .network: return Color(red: 53 / 255, green: 123 / 255, blue: 157 / 255)
+        }
+    }
+    func metricColor(_ fraction: Double) -> Color {
+        fraction >= 0.92 ? critical : fraction >= 0.80 ? warning : primary
+    }
+}
 
-/// 单指标卡片：图标 + 标题 + 大号数值 + 迷你曲线 + 进度条 + 明细。
-struct MetricCard: View {
-    let icon: String
-    let tint: Color
-    let title: String
-    let value: String
-    let progress: Double
-    let history: [Double]
-    let upperBound: Double?
-    let detail: String
+private struct PanelReadingPlate: ViewModifier {
+    let palette: PanelPalette
+    func body(content: Content) -> some View {
+        content.padding(6)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(palette.readingPlate))
+            .padding(-6)
+    }
+}
+
+/// 按压只改变绘制，不改变按钮布局。
+private struct PanelPressButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var scalesContent = true
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && scalesContent && !reduceMotion ? 0.985 : 1)
+            .brightness(configuration.isPressed ? 0.015 : 0)
+            .animation(reduceMotion ? .easeOut(duration: 0.08) :
+                .smooth(duration: configuration.isPressed ? 0.08 : 0.18, extraBounce: 0),
+                value: configuration.isPressed)
+    }
+}
+
+private struct PanelSegmentedControl<Value: Equatable>: View {
+    @Binding var selection: Value
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let options: [(Value, String)]
+    let label: String
+    let palette: PanelPalette
+    var optionHelp: ((Value) -> String)? = nil
+    var optionIdentifier: ((Value) -> String)? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 7) {
-                IconBadge(symbol: icon, tint: tint)
-                Text(title)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                Text(value)
-                    .font(.system(size: 14.5, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(StatusItemController.tint(for: progress).swiftUIColor)
-                Sparkline(series: [history], colors: [tint], upperBound: upperBound)
-                    .frame(width: 78, height: 20)
+        HStack(spacing: 3) {
+            ForEach(options.indices, id: \.self) { index in
+                let option = options[index]
+                let selected = selection == option.0
+                Button { selection = option.0 } label: {
+                    Text(option.1)
+                        .font(.system(size: 11, weight: selected ? .medium : .regular))
+                        .foregroundStyle(selected ? palette.selectedText : palette.secondary)
+                        .transaction { $0.animation = nil }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PanelPressButtonStyle(scalesContent: false))
+                .help(optionHelp?(option.0) ?? option.1)
+                .accessibilityLabel("\(label)，\(option.1)")
+                .accessibilityValue(selected ? "已选择" : "未选择")
+                .accessibilityIdentifier(optionIdentifier?(option.0) ?? "\(label).\(index)")
             }
-            ProgressBar(value: progress, tint: tint)
-            Text(detail)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
-                .monospacedDigit()
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(0.055))
-        )
+        .background {
+            GeometryReader { geometry in
+                if !options.isEmpty {
+                    let slotWidth = max(0, (geometry.size.width - CGFloat(options.count - 1) * 3) / CGFloat(options.count))
+                    let selectedIndex = options.firstIndex { $0.0 == selection } ?? 0
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(palette.accent.opacity(0.23))
+                        .frame(width: slotWidth, height: geometry.size.height)
+                        .offset(x: CGFloat(selectedIndex) * (slotWidth + 3))
+                        .animation(reduceMotion ? nil : .smooth(duration: 0.23, extraBounce: 0), value: selection)
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 8).fill(palette.tile))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.tileBorder, lineWidth: 0.5))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
     }
 }
 
-/// 网络卡片：上下行速度分列显示，曲线按峰值自适应。
-struct NetworkCard: View {
-    let down: Double
-    let up: Double
-    let downHistory: [Double]
-    let upHistory: [Double]
-    let totalDown: UInt64
-    let totalUp: UInt64
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                IconBadge(symbol: "arrow.up.arrow.down", tint: .orange)
-                Text("网络")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                Sparkline(series: [downHistory, upHistory], colors: [.blue, .green], upperBound: nil)
-                    .frame(width: 100, height: 20)
-            }
-
-            HStack(spacing: 10) {
-                speedBlock(symbol: "arrow.down", tint: .blue, caption: "下载", value: Format.speed(down))
-                Divider().frame(height: 26)
-                speedBlock(symbol: "arrow.up", tint: .green, caption: "上传", value: Format.speed(up))
-            }
-
-            Text("本次运行接收 \(Format.bytes(totalDown)) · 发送 \(Format.bytes(totalUp))")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
-                .monospacedDigit()
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(0.055))
-        )
+/// 外观从真实 AppKit 视图读取；popover 中 SwiftUI 的 colorScheme 曾与窗口外观不一致。
+private struct PanelMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = PanelMaterialView()
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
     }
-
-    private func speedBlock(symbol: String, tint: Color, caption: String, value: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(tint)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(caption)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
-                Text(value)
-                    .font(.system(size: 13, weight: .semibold))
-                    .monospacedDigit()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
-// MARK: - 基础组件
-
-struct IconBadge: View {
-    let symbol: String
-    let tint: Color
-    /// 徽章边长。上方四张卡片与「显示项」**统一用默认的 20pt**，
-    /// 这样两者的标题才落在同一条竖线上（见 `metricToggles` 的注释）。
-    var size: CGFloat = 20
-    /// 徽章内图标的字号。
-    var iconSize: CGFloat = 10.5
-
-    var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: iconSize, weight: .semibold))
-            .foregroundStyle(tint)
-            .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(tint.opacity(0.15))
-            )
-    }
+private final class PanelMaterialView: NSVisualEffectView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-struct ProgressBar: View {
-    let value: Double
-    let tint: Color
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.10))
-                Capsule()
-                    .fill(tint)
-                    .frame(width: max(2, geometry.size.width * min(max(value, 0), 1)))
-            }
-        }
-        .frame(height: 5)
-        .animation(.linear(duration: 0.25), value: value)
-    }
-}
-
-/// 迷你折线图，`upperBound` 为 nil 时按数据峰值自适应。
+/// 迷你曲线：百分比固定量程，网速跟随峰值；上传使用虚线以便区分两条趋势。
 struct Sparkline: View {
     let series: [[Double]]
     let colors: [Color]
@@ -576,25 +651,21 @@ struct Sparkline: View {
             let size = geometry.size
             let bound = resolvedBound
             ZStack {
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: size.height - 0.5))
+                    path.addLine(to: CGPoint(x: size.width, y: size.height - 0.5))
+                }
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
                 if let first = series.first, first.count > 1 {
                     areaPath(first, in: size, bound: bound)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    colors.first?.opacity(0.28) ?? .clear,
-                                    colors.first?.opacity(0.02) ?? .clear
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
+                        .fill(LinearGradient(colors: [colors.first?.opacity(0.12) ?? .clear, .clear],
+                                             startPoint: .top, endPoint: .bottom))
                 }
                 ForEach(Array(series.enumerated()), id: \.offset) { index, values in
                     linePath(values, in: size, bound: bound)
-                        .stroke(
-                            colors[min(index, colors.count - 1)],
-                            style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round)
-                        )
+                        .stroke(colors.isEmpty ? .clear : colors[min(index, colors.count - 1)],
+                                style: StrokeStyle(lineWidth: 2, lineCap: .round,
+                                                   lineJoin: .round, dash: index == 0 ? [] : [3, 2]))
                 }
             }
         }
@@ -602,35 +673,26 @@ struct Sparkline: View {
 
     private var resolvedBound: Double {
         if let upperBound, upperBound > 0 { return upperBound }
-        let peak = series.flatMap { $0 }.max() ?? 0
+        let peak = series.flatMap { $0 }.filter { $0.isFinite }.max() ?? 0
         return max(peak * 1.2, 1024)
     }
-
     private func points(_ values: [Double], in size: CGSize, bound: Double) -> [CGPoint] {
-        guard !values.isEmpty else { return [] }
         let step = values.count > 1 ? size.width / CGFloat(values.count - 1) : 0
         return values.enumerated().map { index, value in
-            let normalized = min(max(value / bound, 0), 1)
-            return CGPoint(
-                x: CGFloat(index) * step,
-                y: size.height - CGFloat(normalized) * (size.height - 1.5) - 0.75
-            )
+            let normalized = value.isFinite ? min(max(value / bound, 0), 1) : 0
+            return CGPoint(x: CGFloat(index) * step,
+                           y: size.height - CGFloat(normalized) * max(size.height - 2, 0) - 1)
         }
     }
-
     private func linePath(_ values: [Double], in size: CGSize, bound: Double) -> Path {
         var path = Path()
         let pts = points(values, in: size, bound: bound)
         guard let first = pts.first else { return path }
         path.move(to: first)
-        if pts.count == 1 {
-            path.addLine(to: CGPoint(x: first.x + 0.6, y: first.y))
-        } else {
-            for point in pts.dropFirst() { path.addLine(to: point) }
-        }
+        if pts.count == 1 { path.addLine(to: CGPoint(x: first.x + 0.6, y: first.y)) }
+        else { for point in pts.dropFirst() { path.addLine(to: point) } }
         return path
     }
-
     private func areaPath(_ values: [Double], in size: CGSize, bound: Double) -> Path {
         var path = linePath(values, in: size, bound: bound)
         let pts = points(values, in: size, bound: bound)
@@ -643,8 +705,5 @@ struct Sparkline: View {
 }
 
 extension NSColor {
-    /// 把 AppKit 颜色映射到 SwiftUI 颜色，保证状态栏与面板配色一致。
-    var swiftUIColor: Color {
-        Color(nsColor: self)
-    }
+    var swiftUIColor: Color { Color(nsColor: self) }
 }

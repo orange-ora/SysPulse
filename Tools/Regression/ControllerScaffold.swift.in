@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-enum MenuBarEffect { case off, glow, diffuse }
+enum MenuBarEffect { case off, glow, diffuse, iridescent }
 final class Preferences {
     var showNetwork = true
     var showCPU = true
@@ -28,12 +28,21 @@ final class NSStatusBarButton {
     var image: NSImage?
     var imagePosition = ImagePosition.imageOnly
     var toolTip: String?
+    private let container = NSView(frame: .zero)
+    var bounds: NSRect { NSRect(origin: .zero, size: window?.frame.size ?? .zero) }
+    var subviews: [NSView] { container.subviews }
+    func addSubview(_ view: NSView) {
+        container.frame = bounds
+        container.addSubview(view)
+    }
 }
 final class FakeStatusItem {
     var button: NSStatusBarButton? = NSStatusBarButton()
 }
 final class StatusItemController {
     private let statusItem = FakeStatusItem()
+    private var statusGlassView: StatusItemGlassView?
+    private var glassSizingImage: NSImage?
     private let preferences = Preferences()
     private let densityOrder: [MenuBarDensity] = [.full, .compact, .minimal]
     private var measuredDensityIndex: Int? = 1

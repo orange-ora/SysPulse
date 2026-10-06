@@ -21,7 +21,7 @@ done
 
 if [ "$LOCAL_ONLY" = 0 ]; then
     if [ ! -w "$INSTALL_DIR" ]; then
-        echo "无法写入 $INSTALL_DIR；安装停止。可用 --local 生成压缩包。" >&2
+        echo "无法写入 ${INSTALL_DIR}；安装停止。可用 --local 生成压缩包。" >&2
         exit 1
     fi
     if [ -L "$APP_DIR" ] || { [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR" ]; }; then

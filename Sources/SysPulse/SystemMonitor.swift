@@ -6,6 +6,7 @@ final class SystemMonitor: ObservableObject {
     static let historyLength = 60
 
     @Published private(set) var snapshot = MetricsSnapshot()
+    @Published private(set) var deviceInformation = DeviceInformation.fallback()
     @Published private(set) var cpuHistory: [Double]
     @Published private(set) var gpuHistory: [Double]
     @Published private(set) var memoryHistory: [Double]
@@ -42,6 +43,12 @@ final class SystemMonitor: ObservableObject {
         memoryHistory = zeros
         downHistory = zeros
         upHistory = zeros
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let information = DeviceInformation.load()
+            DispatchQueue.main.async { [weak self] in
+                self?.deviceInformation = information
+            }
+        }
     }
 
     deinit {

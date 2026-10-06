@@ -168,7 +168,7 @@ def workflow_checks():
         (root / 'Resources').mkdir()
         (root / 'Resources/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString': '9.8.7', 'CFBundleVersion': '1'}))
         (root / 'Resources/AppIcon.icns').write_bytes(b'fixture-icon')
-        (root / 'CHANGELOG.md').write_text('# Updates\n\n## Version\nFixture release notes\n')
+        (root / 'CHANGELOG.md').write_text('# Updates\n\n## v9.8.7（fixture）\nFixture release notes\n[Report](<docs/UPDATE-v9.8.7.md>)\n[Install](<README.md#下载与安装>)\n\n## v9.8.6（fixture）\nPrevious release notes\n')
         (root / 'build').mkdir()
         (root / 'build/SysPulse').write_text('new executable\n')
         commands = root / 'commands'
@@ -182,12 +182,19 @@ def workflow_checks():
         log = root / 'commands.log'
         log.write_text('')
         env = dict(os.environ, PATH=str(commands) + ':' + os.environ['PATH'], RUNNER_TEMP=str(runner_temp),
-                   GITHUB_REF_NAME='v9.8.7', GITHUB_SHA='123456789', FIXTURE_LOG=str(log), FIXTURE_INSTALL=str(root / 'Applications'))
+                   GITHUB_REPOSITORY='fixture/SysPulse', GITHUB_REF_NAME='v9.8.7', GITHUB_SHA='123456789', FIXTURE_LOG=str(log), FIXTURE_INSTALL=str(root / 'Applications'))
         result = subprocess.run(['bash', '-c', package_script], cwd=root, env=env, capture_output=True, text=True, errors='replace')
         check(result.returncode == 0, 'CI packaging script executes successfully with controlled tools: ' + result.stderr)
         check(not list(runner_temp.iterdir()), 'CI packaging success trap removes expanded app')
         checksum = (root / 'release/SysPulse-9.8.7.dmg.sha256').read_text().split()
         check(checksum[1] == 'SysPulse-9.8.7.dmg', 'CI emits version-derived DMG and checksum')
+        notes = (root / 'release/notes.md').read_text()
+        check('Fixture release notes' in notes and 'Previous release notes' not in notes, 'CI release notes include only the current version')
+        check('https://github.com/fixture/SysPulse/blob/v9.8.7/docs/UPDATE-v9.8.7.md' in notes and
+              'https://github.com/fixture/SysPulse/blob/v9.8.7/README.md#下载与安装' in notes and
+              'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/panel.png' in notes and
+              'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/settings.png' in notes,
+              'CI release report, install links and screenshots use the version tag')
         env['FIXTURE_FAIL'] = 'sign'
         result = subprocess.run(['bash', '-c', package_script], cwd=root, env=env, capture_output=True, text=True, errors='replace')
         check(result.returncode != 0 and not list(runner_temp.iterdir()), 'CI signing failure stops and cleans expanded app')

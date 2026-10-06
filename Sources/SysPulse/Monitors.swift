@@ -491,3 +491,163 @@ enum ProcessMonitor {
         return 0
     }
 }
+
+// MARK: - 设备信息（启动时后台读取一次，不参与实时指标采样）
+
+struct DeviceInformation {
+    var modelName: String
+    var modelIdentifier: String
+    var processorName: String
+    var memoryDescription: String
+
+    static func fallback() -> DeviceInformation {
+        let identifier = sysctlString("hw.model") ?? "Mac"
+        let processor = sysctlString("machdep.cpu.brand_string") ??
+            (hasAppleSilicon ? "Apple 芯片" : "处理器信息未提供")
+        let memory = capacityDescription(Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
+        return DeviceInformation(modelName: identifier, modelIdentifier: identifier,
+                                 processorName: processor,
+                                 memoryDescription: memory + (hasAppleSilicon ? " 统一内存" : ""))
+    }
+
+    /// 在 utility 队列调用。只启动一次 system_profiler，失败或超时保留可靠的 sysctl 信息。
+    static func load() -> DeviceInformation {
+        var information = fallback()
+        guard let data = profilerData(),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return information
+        }
+        let hardware = (root["SPHardwareDataType"] as? [[String: Any]])?.first ?? [:]
+        if let name = text(hardware["machine_name"]) { information.modelName = name }
+        if let identifier = text(hardware["machine_model"]) { information.modelIdentifier = identifier }
+        let chip = text(hardware["chip_type"])
+        if let processor = chip ?? text(hardware["cpu_type"]) { information.processorName = processor }
+
+        var modules: [MemoryModule: Int] = [:]
+        var types = Set<String>()
+        if let memory = root["SPMemoryDataType"] { collectMemory(memory, modules: &modules, types: &types) }
+        let total = capacityDescription(Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
+        let unified = chip?.hasPrefix("Apple ") == true || hasAppleSilicon
+        if unified {
+            information.memoryDescription = total + " 统一内存"
+            if !types.isEmpty { information.memoryDescription += " · " + types.sorted().joined(separator: " / ") }
+        } else if !modules.isEmpty {
+            let combinations = modules.keys.sorted {
+                $0.gigabytes == $1.gigabytes ? $0.type < $1.type : $0.gigabytes < $1.gigabytes
+            }.map { module in
+                "\(modules[module] ?? 1)×\(capacityDescription(module.gigabytes))" +
+                    (module.type.isEmpty ? "" : " \(module.type)")
+            }
+            information.memoryDescription = total + " · " + combinations.joined(separator: " + ")
+        } else {
+            information.memoryDescription = total
+            if !types.isEmpty { information.memoryDescription += " · " + types.sorted().joined(separator: " / ") }
+        }
+        return information
+    }
+
+    private struct MemoryModule: Hashable {
+        let gigabytes: Double
+        let type: String
+    }
+
+    private static func collectMemory(_ value: Any, modules: inout [MemoryModule: Int],
+                                      types: inout Set<String>, depth: Int = 0) {
+        guard depth < 32 else { return }
+        if let dictionary = value as? [String: Any] {
+            let type = text(dictionary["dimm_type"]) ?? ""
+            if !type.isEmpty { types.insert(type) }
+            if let size = text(dictionary["dimm_size"]), let gigabytes = capacityInGB(size) {
+                modules[MemoryModule(gigabytes: gigabytes, type: type), default: 0] += 1
+            }
+            for child in dictionary.values {
+                collectMemory(child, modules: &modules, types: &types, depth: depth + 1)
+            }
+        } else if let array = value as? [Any] {
+            for child in array {
+                collectMemory(child, modules: &modules, types: &types, depth: depth + 1)
+            }
+        }
+    }
+
+    private static func text(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !["unknown", "empty", "not available", "n/a"].contains(trimmed.lowercased()) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func capacityInGB(_ text: String) -> Double? {
+        let parts = text.uppercased().split(whereSeparator: { $0.isWhitespace })
+        guard parts.count >= 2, let amount = Double(parts[0]), amount.isFinite, amount > 0 else { return nil }
+        let scale: Double
+        switch parts[1] {
+        case "GB", "GIB": scale = 1
+        case "MB", "MIB": scale = 1 / 1024
+        case "TB", "TIB": scale = 1024
+        default: return nil
+        }
+        let gigabytes = amount * scale
+        return gigabytes.isFinite && gigabytes > 0 ? gigabytes : nil
+    }
+
+    private static func capacityDescription(_ gigabytes: Double) -> String {
+        String(format: gigabytes == gigabytes.rounded() ? "%.0f GB" : "%.1f GB", gigabytes)
+    }
+
+    private static var hasAppleSilicon: Bool {
+        var supported: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        return sysctlbyname("hw.optional.arm64", &supported, &size, nil, 0) == 0 && supported == 1
+    }
+
+    private static func sysctlString(_ name: String) -> String? {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0, size < 4096 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: size)
+        let result = bytes.withUnsafeMutableBytes { buffer in
+            sysctlbyname(name, buffer.baseAddress, &size, nil, 0)
+        }
+        guard result == 0 else { return nil }
+        return text(String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self))
+    }
+
+    private static func profilerData() -> Data? {
+        // 文件输出避免 pipe 缓冲写满阻塞；临时文件只允许当前用户读取，退出后删除。
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SysPulse-hardware-\(UUID().uuidString).json")
+        guard FileManager.default.createFile(atPath: url.path, contents: nil,
+                                            attributes: [.posixPermissions: 0o600]),
+              let output = try? FileHandle(forWritingTo: url) else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        defer {
+            try? output.close()
+            try? FileManager.default.removeItem(at: url)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
+        process.arguments = ["SPHardwareDataType", "SPMemoryDataType", "-json", "-detailLevel", "mini"]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        // 回调仅持有 semaphore；Process 的启动、停止与状态读取全部留在调用线程。
+        process.terminationHandler = { _ in finished.signal() }
+        do { try process.run() } catch { return nil }
+        if finished.wait(timeout: .now() + 14.5) == .timedOut {
+            if process.isRunning { process.terminate() }
+            if finished.wait(timeout: .now() + 0.25) == .timedOut {
+                if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+                _ = finished.wait(timeout: .now() + 0.25)
+            }
+            return nil
+        }
+        guard process.terminationStatus == 0,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber, size.intValue <= 4 * 1024 * 1024 else { return nil }
+        return try? Data(contentsOf: url)
+    }
+}

@@ -12,6 +12,8 @@ import SwiftUI
 /// 都收不到），会导致面板打不开，因此回到系统状态栏项方案。
 final class StatusItemController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
+    private var statusGlassView: StatusItemGlassView?
+    private var glassSizingImage: NSImage?
     private let popover = NSPopover()
     private let monitor = SystemMonitor()
     private let preferences = Preferences.shared
@@ -155,6 +157,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 而且时长不可调。关掉后展开只要约 110ms，跟手得多。
         popover.animates = false
         popover.delegate = self
+        // 面板固定为暖白玻璃；菜单栏读数仍跟随系统外观。
+        popover.appearance = NSAppearance(named: .aqua)
 
         // 点到别的 App / 桌面就收起。
         // 注意：状态栏项的窗口属于 WindowServer，对全局监听来说也算"别的 App"，
@@ -181,8 +185,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             }
             .store(in: &cancellables)
 
-        // 任何偏好变化都要立刻按新设置重画状态栏项
-        preferences.objectWillChange
+        // 只有改变菜单栏内容/排版的偏好才触发重绘。
+        // 面板通透度在拖动时连续发布，不能让这些变化进入状态栏的宽度/锚点状态机。
+        let menuBarChanges: [AnyPublisher<Void, Never>] = [
+            preferences.$showNetwork.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            preferences.$showCPU.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            preferences.$showGPU.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            preferences.$showMemory.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            preferences.$menuBarLayout.dropFirst().map { _ in () }.eraseToAnyPublisher()
+        ]
+        Publishers.MergeMany(menuBarChanges)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self else { return }
@@ -205,9 +217,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
         monitor.start()
 
-        // 背景动效（流光 / 漫散射）：只在选中某一效果时跑一个 `effectFramesPerSecond`
-        // 帧率的轻量定时器。注意它**只重画背景那一层**（`MenuBarImage.drawEffect`），
-        // 文字的排版与绘制仍然只跟着数据刷新走；关掉就立刻停表，不留常驻开销。
+        // 菜单栏动效（流光 / 光晕 / 炫彩）：选中效果时共用 `effectFramesPerSecond`
+        // 的轻量计时器。前两项绘制背景，炫彩只绘制字形内的光泽；
+        // 动效帧不参与排版档位决策，关闭后立刻停表。
         preferences.$menuBarEffect
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -364,15 +376,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 实测要占 35MB 左右，而且关掉之后系统也不回收，还会每秒跟着数据重绘。
         // 所以关闭时释放，下次打开再建（历史曲线在 SystemMonitor 里，不受影响）。
         if popover.contentViewController == nil {
-            // 底部三个菜单里选完任一项就收起整个面板：菜单（NSMenu）自己会关，
-            // 但面板是独立的 NSPopover，不主动收就会留在屏幕上挡视线。
-            let view = DashboardView(
-                monitor: monitor,
-                preferences: preferences,
-                onMenuSelection: { [weak self] in
-                    self?.closePopoverIfShown()
-                }
-            )
+            // 设置页保留面板，允许连续调整；外部点击和状态栏按钮仍负责收起。
+            let view = DashboardView(monitor: monitor, preferences: preferences)
             let hosting = NSHostingController(rootView: view)
             hosting.sizingOptions = .preferredContentSize
             popover.contentViewController = hosting
@@ -621,7 +626,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 上一次的图片宽度要在换图**之前**取：换档预测靠它求宽度差
         let previousImageWidth = lastRenderedImageWidth
         lastRenderedImageWidth = image?.size.width
-        button.image = image
+        applyMenuBarImage(image, to: button)
         button.imagePosition = .imageOnly
         button.toolTip = MenuBarImage.tooltip(snapshot: snapshot)
 
@@ -645,6 +650,34 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             button: button
         )
         syncPanelAnchor()
+    }
+
+    /// 保留系统按钮的图片尺寸与事件，炫彩的真实材质单独放在按钮内部。
+    private func applyMenuBarImage(_ image: NSImage?, to button: NSStatusBarButton) {
+        guard preferences.menuBarEffect == .iridescent, let image, !image.isTemplate else {
+            statusGlassView?.removeFromSuperview()
+            statusGlassView = nil
+            glassSizingImage = nil
+            button.image = image
+            return
+        }
+        if glassSizingImage?.size != image.size {
+            let sizingImage = NSImage(size: image.size, flipped: false) { _ in true }
+            sizingImage.isTemplate = false
+            glassSizingImage = sizingImage
+        }
+        button.image = glassSizingImage
+        let glass: StatusItemGlassView
+        if let existing = statusGlassView {
+            glass = existing
+        } else {
+            glass = StatusItemGlassView(frame: button.bounds)
+            glass.autoresizingMask = [.width, .height]
+            button.addSubview(glass)
+            statusGlassView = glass
+        }
+        glass.frame = button.bounds
+        glass.setImage(image)
     }
 
     /// 换档那一瞬间就按**预测的最终位置**把面板重新锚定好，抢在"系统用中间态摆错位置"
@@ -844,5 +877,66 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         case ..<0.92: return .systemOrange
         default: return .systemRed
         }
+    }
+}
+
+/// 材质嵌在系统状态栏按钮内，不另建窗口，也不接管鼠标点击。
+private final class StatusItemGlassView: NSView {
+    private let imageView: NSImageView
+    private let materialView: NSView
+    private var imageSize = NSSize.zero
+
+    override init(frame frameRect: NSRect) {
+        let text = NSImageView(frame: .zero)
+        text.imageScaling = .scaleProportionallyDown
+        text.imageAlignment = .alignCenter
+        text.setAccessibilityElement(false)
+        imageView = text
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView(frame: .zero)
+            glass.style = .clear
+            glass.tintColor = nil
+            glass.contentView = text
+            materialView = glass
+        } else {
+            let frost = NSVisualEffectView(frame: .zero)
+            frost.material = .menu
+            frost.blendingMode = .behindWindow
+            frost.state = .active
+            frost.wantsLayer = true
+            frost.layer?.masksToBounds = true
+            frost.addSubview(text)
+            materialView = frost
+        }
+        super.init(frame: frameRect)
+        setAccessibilityElement(false)
+        addSubview(materialView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func setImage(_ image: NSImage) {
+        if imageSize != image.size {
+            imageSize = image.size
+            needsLayout = true
+        }
+        imageView.image = image
+    }
+
+    override func layout() {
+        super.layout()
+        let width = min(imageSize.width, bounds.width)
+        let height = min(imageSize.height, bounds.height)
+        materialView.frame = NSRect(x: (bounds.width - width) / 2,
+                                    y: (bounds.height - height) / 2,
+                                    width: width, height: height)
+        if #available(macOS 26.0, *), let glass = materialView as? NSGlassEffectView {
+            glass.cornerRadius = height / 2
+        } else {
+            materialView.layer?.cornerRadius = height / 2
+        }
+        imageView.frame = materialView.bounds
     }
 }

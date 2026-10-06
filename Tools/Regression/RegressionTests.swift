@@ -209,6 +209,123 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         if monitor.snapshot.gpuUsage == nil { print("NOTE: live GPU counter unavailable; history assertion used nil→0 fallback.") }
     }
 
+    static func displayPreferences() {
+        let suiteName = "SysPulse.Regression.DisplayPreferences.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let prefs = Preferences(defaults: defaults)
+        check(close(prefs.panelTransparency, 0.71) && prefs.showNetwork && prefs.showCPU &&
+              prefs.showGPU && prefs.showMemory && prefs.refreshInterval == 2 &&
+              prefs.menuBarLayout == .auto && prefs.menuBarEffect == .diffuse,
+              "display preferences: fresh isolated suite has captured display defaults")
+        // 已存旧默认值和其他有效配置均应保留，不被新默认值覆盖。
+        prefs.refreshInterval = 1
+        prefs.panelTransparency = 0.30
+        prefs.menuBarEffect = .off
+        let oldDefaults = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+        check(oldDefaults.refreshInterval == 1 && close(oldDefaults.panelTransparency, 0.30) &&
+              oldDefaults.menuBarEffect == .off,
+              "display preferences: stored previous defaults remain unchanged")
+        prefs.showNetwork = false
+        prefs.showCPU = false
+        prefs.showGPU = false
+        prefs.showMemory = false
+        prefs.refreshInterval = 5
+        prefs.panelTransparency = 0.52
+        prefs.menuBarLayout = .compact
+        prefs.menuBarEffect = .glow
+        let custom = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+        check(!custom.showNetwork && !custom.showCPU && !custom.showGPU && !custom.showMemory &&
+              custom.refreshInterval == 5 && close(custom.panelTransparency, 0.52) &&
+              custom.menuBarLayout == .compact && custom.menuBarEffect == .glow,
+              "display preferences: existing valid custom display settings remain unchanged")
+        // 原有范围内的存值与新增高通透值都应原样持久化、重载。
+        for value in [0.30, 0.52, 0.70, 0.95, 1.0] {
+            prefs.panelTransparency = value
+            let reloaded = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+            check(close(defaults.double(forKey: Preferences.Keys.panelTransparency), value) &&
+                  close(reloaded.panelTransparency, value),
+                  "display preferences: transparency \(value) persists and reloads")
+        }
+        check(MenuBarEffect.allCases.map { $0.rawValue } == ["off", "glow", "diffuse", "iridescent"],
+              "display preferences: effect raw values retain stored compatibility")
+        check(MenuBarEffect.allCases.map { $0.title } == ["无光效", "流光", "光晕", "炫彩"],
+              "display preferences: effect titles match current UI labels")
+        prefs.menuBarEffect = .iridescent
+        let iridescent = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+        check(defaults.string(forKey: Preferences.Keys.menuBarEffect) == "iridescent" &&
+              iridescent.menuBarEffect == .iridescent,
+              "display preferences: iridescent effect persists and reloads in isolated suite")
+        defaults.set("breathe", forKey: Preferences.Keys.menuBarEffect)
+        let migrated = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+        check(migrated.menuBarEffect == .iridescent &&
+              defaults.string(forKey: Preferences.Keys.menuBarEffect) == "iridescent",
+              "display preferences: retired breathe choice migrates to iridescent and persists")
+
+        for (invalid, expected) in [(Double.nan, 0.71), (Double.infinity, 0.71),
+                                    (-Double.infinity, 0.71), (-0.2, 0.0), (1.2, 1.0)] {
+            defaults.set(invalid, forKey: Preferences.Keys.panelTransparency)
+            let repaired = Preferences(defaults: defaults)
+            check(close(repaired.panelTransparency, expected) &&
+                  close(defaults.double(forKey: Preferences.Keys.panelTransparency), expected) &&
+                  close(Preferences.normalizedPanelTransparency(invalid), expected),
+                  "display preferences: invalid stored transparency \(invalid) normalizes to \(expected)")
+        }
+        prefs.panelTransparency = .nan
+        check(close(prefs.panelTransparency, 0.71) &&
+              close(defaults.double(forKey: Preferences.Keys.panelTransparency), 0.71),
+              "display preferences: nonfinite assignment persists safe default")
+        prefs.panelTransparency = 2
+        check(close(prefs.panelTransparency, 1.0) &&
+              close(defaults.double(forKey: Preferences.Keys.panelTransparency), 1.0),
+              "display preferences: out-of-range assignment is clamped in memory and storage")
+
+        prefs.showNetwork = false
+        prefs.showCPU = false
+        prefs.showGPU = false
+        prefs.showMemory = false
+        prefs.refreshInterval = 5
+        prefs.menuBarLayout = .minimal
+        prefs.menuBarEffect = .off
+        defaults.set("keep", forKey: "unrelatedPreference")
+        let service = SMAppService.mainApp
+        let loginCalls = (service.registerCalls, service.unregisterCalls)
+        let loginStatus = service.status
+        prefs.resetDisplaySettings()
+        check(prefs.showNetwork && prefs.showCPU && prefs.showGPU && prefs.showMemory &&
+              prefs.refreshInterval == 2 && prefs.menuBarLayout == .auto &&
+              prefs.menuBarEffect == .diffuse && close(prefs.panelTransparency, 0.71),
+              "display preferences: reset updates every display value in memory")
+        let reset = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+        check(reset.showNetwork && reset.showCPU && reset.showGPU && reset.showMemory &&
+              reset.refreshInterval == 2 && reset.menuBarLayout == .auto &&
+              reset.menuBarEffect == .diffuse && close(reset.panelTransparency, 0.71) &&
+              defaults.string(forKey: "unrelatedPreference") == "keep",
+              "display preferences: reset persists captured defaults and preserves unrelated preferences")
+        check(service.registerCalls == loginCalls.0 && service.unregisterCalls == loginCalls.1 &&
+              service.status == loginStatus,
+              "display preferences: reset does not change login item")
+        defaults.set("unrecognized-layout", forKey: Preferences.Keys.menuBarLayout)
+        defaults.set("unrecognized-effect", forKey: Preferences.Keys.menuBarEffect)
+        let unknown = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+        check(unknown.menuBarLayout == .auto && unknown.menuBarEffect == .diffuse,
+              "display preferences: unknown enums fall back to current captured defaults")
+        for legacyGlow in [false, true] {
+            defaults.set(legacyGlow, forKey: Preferences.Keys.legacyMenuBarGlow)
+            let legacy = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+            let expected: MenuBarEffect = legacyGlow ? .glow : .off
+            check(legacy.menuBarEffect == expected &&
+                  defaults.string(forKey: Preferences.Keys.menuBarEffect) == expected.rawValue &&
+                  defaults.object(forKey: Preferences.Keys.legacyMenuBarGlow) == nil,
+                  "display preferences: legacy glow \(legacyGlow) still migrates without adopting new default")
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        check(defaults.persistentDomain(forName: suiteName)?.isEmpty != false,
+              "display preferences: isolated suite is cleaned up")
+    }
+
     static func login() {
         let service = SMAppService.mainApp
         let login = LaunchAtLogin.shared
@@ -263,7 +380,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         ProcessFixture.fail = false
     }
 
-    static func pixels(_ elapsed: Double) -> [UInt8] {
+    static func pixels(_ elapsed: Double, effect: MenuBarEffect = .glow) -> [UInt8] {
         let w = 215, h = 19
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -273,7 +390,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)!
         NSColor.white.setFill()
         NSRect(x: 0, y: 0, width: w, height: h).fill()
-        MenuBarImage.drawEffect(size: NSSize(width: w, height: h), effect: .glow, elapsed: elapsed)
+        MenuBarImage.drawEffect(size: NSSize(width: w, height: h), effect: effect, elapsed: elapsed)
         NSGraphicsContext.current?.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
         return Array(UnsafeBufferPointer(start: rep.bitmapData!, count: w * h * 4))
@@ -294,6 +411,88 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         check(later < 0.001, "glow: subsequent cycle boundary is also continuous")
     }
 
+    static func iridescent() {
+        let suite = "SysPulse.Regression.Iridescent.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = Preferences(defaults: defaults)
+        var snapshot = MetricsSnapshot()
+        snapshot.cpuUsage = 0.35
+        snapshot.gpuUsage = 42
+        snapshot.memoryFraction = 0.61
+        snapshot.downSpeed = 2_400_000
+        snapshot.upSpeed = 320_000
+        func raster(_ image: NSImage, background: NSColor = .clear) -> [UInt8] {
+            let w = Int(image.size.width * 2), h = Int(image.size.height * 2)
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                      isPlanar: false, colorSpaceName: .deviceRGB,
+                                      bytesPerRow: w * 4, bitsPerPixel: 32)!
+            rep.bitmapData!.initialize(repeating: 0, count: w * h * 4)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)!
+            background.setFill()
+            let rect = NSRect(x: 0, y: 0, width: w, height: h)
+            rect.fill(using: .copy)
+            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            NSGraphicsContext.current?.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+            return Array(UnsafeBufferPointer(start: rep.bitmapData!, count: w * h * 4))
+        }
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            for density in [MenuBarDensity.full, .compact, .minimal] {
+                func image(_ elapsed: Double?) -> NSImage {
+                    MenuBarImage.render(snapshot: snapshot, preferences: preferences,
+                        appearance: NSAppearance(named: name), density: density,
+                        effect: .iridescent, effectElapsed: elapsed)!
+                }
+                let firstImage = image(0), movingImage = image(3), nextImage = image(5)
+                let first = raster(firstImage), moving = raster(movingImage), next = raster(nextImage)
+                let label = "\(name.rawValue)/\(density)"
+                let width = Int(firstImage.size.width * 2), height = Int(firstImage.size.height * 2)
+                var occupied = 0, colorful = 0, warm = 0, animated = 0
+                var stableAlpha = true, transparentEdges = true
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let offset = (y * width + x) * 4
+                        let alpha = first[offset + 3]
+                        if alpha > 0 { occupied += 1 }
+                        stableAlpha = stableAlpha && alpha == moving[offset + 3]
+                        if x < 2 || x >= width - 2 {
+                            transparentEdges = transparentEdges && alpha == 0 && moving[offset + 3] == 0
+                        }
+                        if alpha > 160 {
+                            let red = Int(first[offset]), green = Int(first[offset + 1]), blue = Int(first[offset + 2])
+                            if max(red, green, blue) - min(red, green, blue) > 15 { colorful += 1 }
+                            if red > green + 2 && red > blue + 2 { warm += 1 }
+                            let change = (0..<3).reduce(0) { $0 + abs(Int(first[offset + $1]) - Int(moving[offset + $1])) }
+                            if change > 15 { animated += 1 }
+                        }
+                    }
+                }
+                check(occupied > 0 && occupied < width * height / 2 && transparentEdges,
+                      "iridescent \(label): only glyphs have alpha, surrounding blank space stays transparent")
+                check(colorful > 20 && warm == 0,
+                      "iridescent \(label): glyph colors remain blue/cyan/violet with no warm red or orange dominance")
+                check(animated > 5 && stableAlpha,
+                      "iridescent \(label): local pearl shine moves while the glyph alpha mask remains unchanged")
+                check(firstImage.size == movingImage.size && firstImage.size == nextImage.size &&
+                      distance(first, next) < 0.001 && distance(raster(image(4.999999)), next) < 0.001,
+                      "iridescent \(label): image size and five-second boundary remain stable")
+                check(distance(first, raster(image(nil))) < 0.001 && distance(first, raster(image(.infinity))) < 0.001,
+                      "iridescent \(label): absent or nonfinite phase draws a valid static glyph effect")
+                let background = NSColor(calibratedRed: 0.2, green: 0.1, blue: 0.3, alpha: 1)
+                let composited = raster(movingImage, background: background)
+                let reference = raster(NSImage(size: firstImage.size), background: background)
+                let untouched = stride(from: 0, to: first.count, by: 4).allSatisfy { offset in
+                    guard first[offset + 3] == 0 else { return true }
+                    return Array(composited[offset..<(offset + 4)]) == Array(reference[offset..<(offset + 4)])
+                }
+                check(untouched, "iridescent \(label): isolated sourceIn leaves the existing destination unchanged outside glyphs")
+            }
+        }
+    }
+
     static func installationIdentity() {
         func canonical(_ path: String) -> Bool {
             SingleInstance.isCanonicalInstallation(URL(fileURLWithPath: path))
@@ -312,10 +511,12 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         network()
         networkParser()
         gpu()
+        displayPreferences()
         login()
         hostReferences()
         processCount()
         glow()
+        iridescent()
         installationIdentity()
         print("\n\(passed) regression assertions passed. No GUI app installation or real login-item changes.")
     }

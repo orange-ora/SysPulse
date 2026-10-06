@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +25,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          xcodebuild -version
+          SDK_VERSION=$(xcrun --sdk macosx --show-sdk-version)
+          test "${SDK_VERSION%%.*}" -ge 26
           mkdir -p build/modulecache
           for arch in arm64 x86_64; do
             swiftc -O -wmo -swift-version 5 -warnings-as-errors \
@@ -72,7 +75,13 @@ jobs:
           (stage / 'Applications').symlink_to('/Applications', target_is_directory=True)
           Path('release/version.txt').write_text(version)
           notes = '# SysPulse v' + version + '\n\nmacOS 14.0+；通用安装包支持 Apple Silicon 与 Intel。应用采用 ad-hoc 签名，首次打开方式见 README。随包提供 SHA-256 校验文件。\n\n'
-          notes += Path('CHANGELOG.md').read_text().split('\n', 2)[2]
+          changelog = Path('CHANGELOG.md').read_text()
+          current = changelog.split('## v' + version + '（', 1)[1].split('\n', 1)[1].split('\n## ', 1)[0].strip()
+          notes += current.replace('<docs/UPDATE-v' + version + '.md>', 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/blob/v' + version + '/docs/UPDATE-v' + version + '.md').replace('<README.md#下载与安装>', 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/blob/v' + version + '/README.md#下载与安装') + '\n\n'
+          repo = os.environ['GITHUB_REPOSITORY']
+          base = 'https://raw.githubusercontent.com/' + repo + '/v' + version + '/docs/'
+          notes += '### 新版界面\n\n![指标面板](' + base + 'panel.png)\n\n![显示与外观设置](' + base + 'settings.png)\n\n'
+          notes += '[完整更新报告](https://github.com/' + repo + '/blob/v' + version + '/docs/UPDATE-v' + version + '.md)\n'
           Path('release/notes.md').write_text(notes)
           PY
           codesign --force --deep --sign - "$RELEASE_TEMP/staging/SysPulse.app"

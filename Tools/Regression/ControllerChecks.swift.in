@@ -181,5 +181,115 @@
         compactRecovery.updateStatusItem(with: sampled(ready))
         precondition(compactRecovery.measuredDensityIndex == 0)
         print("compact nil→value: actual width106 unchanged, upgrade has no extra recovery delay")
+        var glassAssertions = 0
+        func verifyGlass(_ condition: @autoclosure () -> Bool, _ message: String) {
+            let passed = condition()
+            if !passed { FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8)) }
+            precondition(passed, message)
+            glassAssertions += 1
+        }
+        func textView(in host: StatusItemGlassView) -> NSImageView? {
+            guard let material = host.subviews.first else { return nil }
+            if #available(macOS 26.0, *), let glass = material as? NSGlassEffectView {
+                return glass.contentView as? NSImageView
+            }
+            return material.subviews.first as? NSImageView
+        }
+        let glassController = StatusItemController()
+        let glassButton = glassController.statusItem.button!
+        glassController.preferences.menuBarEffect = .iridescent
+        let glassFirstSample = sampled(ready)
+        glassController.updateStatusItem(with: glassFirstSample, allowLayoutChange: false)
+        let host = glassController.statusGlassView!
+        let sizing = glassController.glassSizingImage!
+        let glyph = textView(in: host)!
+        verifyGlass(glassButton.subviews.count == 1 && glassButton.subviews.first === host,
+                    "iridescent attaches one real native glass host")
+        verifyGlass(glassButton.image === sizing && sizing.size.width == 106 && !sizing.isTemplate,
+                    "iridescent placeholder preserves the renderer width")
+        verifyGlass(glyph.image?.size == sizing.size && glyph.image?.isTemplate == false,
+                    "real glyph image is embedded inside the native material")
+        host.layout()
+        let material = host.subviews.first!
+        let clampedSize = NSSize(width: min(sizing.size.width, glassButton.bounds.width),
+                                 height: min(sizing.size.height, glassButton.bounds.height))
+        verifyGlass(material.frame.size == clampedSize && glyph.frame.size == clampedSize &&
+                    glyph.image?.size == sizing.size,
+                    "native material stays within button bounds while preserving the intrinsic glyph image")
+        verifyGlass(host.frame == glassButton.bounds && host.window == nil,
+                    "glass uses the fake button bounds without creating a real window")
+        verifyGlass(host.hitTest(NSPoint(x: host.bounds.midX, y: host.bounds.midY)) == nil,
+                    "glass host passes clicks through to the original button")
+        let steadySample = sampled(ready)
+        glassController.updateStatusItem(with: steadySample, allowLayoutChange: false)
+        glassController.recentMinX = [1120,1071]
+        let steadyDensity = glassController.measuredDensityIndex
+        let steadyHistory = glassController.recentMinX
+        let firstGlyphImage = glyph.image
+        for frame in 1...10 {
+            glassController.effectElapsed = Double(frame) / 10
+            glassController.updateStatusItem(with: steadySample, allowLayoutChange: false)
+            verifyGlass(glassController.measuredDensityIndex == steadyDensity &&
+                        glassController.recentMinX == steadyHistory,
+                        "10fps effect frames preserve density and accepted geometry history")
+            verifyGlass(glassController.statusGlassView === host &&
+                        glassController.glassSizingImage === sizing && glassButton.subviews.count == 1,
+                        "10fps frames reuse both native host and fixed-width placeholder")
+        }
+        verifyGlass(glyph.image !== firstGlyphImage && glyph.image?.size == sizing.size,
+                    "effect frames update real glyph images without changing size")
+        print("native glass: real host/content, same-width placeholder, click pass-through and ten 10fps frames verified")
+        glassController.preferences.menuBarLayout = .full
+        glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        host.layout()
+        verifyGlass(glassController.statusGlassView === host && glassButton.subviews.count == 1,
+                    "density changes keep the same native host")
+        verifyGlass(glassController.glassSizingImage !== sizing &&
+                    glassController.glassSizingImage?.size.width == 215 && glyph.image?.size.width == 215,
+                    "density changes resize placeholder and real glyph image together")
+        glassController.preferences.menuBarEffect = .diffuse
+        glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        verifyGlass(glassController.statusGlassView == nil && glassController.glassSizingImage == nil,
+                    "switching to diffuse clears glass and sizing caches")
+        verifyGlass(host.superview == nil && glassButton.subviews.isEmpty,
+                    "switching to diffuse removes the real host from its superview")
+        verifyGlass(glassButton.image?.size.width == 215 && glassButton.image?.isTemplate == false,
+                    "diffuse restores the ordinary full-width rendered image")
+        let ordinaryImage = NSImage(size: NSSize(width: 42, height: 18))
+        glassController.applyMenuBarImage(ordinaryImage, to: glassButton)
+        verifyGlass(glassButton.image === ordinaryImage,
+                    "ordinary rendering passes the supplied image through unchanged")
+        glassController.preferences.menuBarEffect = .iridescent
+        glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        let recreatedHost = glassController.statusGlassView!
+        verifyGlass(recreatedHost !== host && glassButton.subviews.count == 1,
+                    "returning to iridescent creates one fresh host after cleanup")
+        glassController.preferences.menuBarEffect = .off
+        glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        verifyGlass(glassController.statusGlassView == nil && glassController.glassSizingImage == nil &&
+                    recreatedHost.superview == nil && glassButton.subviews.isEmpty,
+                    "switching off removes host and placeholder and restores ordinary image")
+        verifyGlass(glassButton.image?.size.width == 215 && glassButton.image?.isTemplate == false,
+                    "off retains the normal image width and glyph rendering")
+        glassController.preferences.menuBarEffect = .iridescent
+        glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        let beforeDisabledHost = glassController.statusGlassView!
+        glassController.preferences.showNetwork = false
+        glassController.preferences.showCPU = false
+        glassController.preferences.showGPU = false
+        glassController.preferences.showMemory = false
+        glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        verifyGlass(glassController.statusGlassView == nil && glassController.glassSizingImage == nil &&
+                    beforeDisabledHost.superview == nil && glassButton.subviews.isEmpty,
+                    "all metrics disabled removes an existing native host")
+        verifyGlass(glassButton.image?.isTemplate == true && glassButton.image?.size == NSSize(width: 15, height: 15),
+                    "all metrics disabled retains the original template placeholder")
+        glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        verifyGlass(glassController.statusGlassView == nil && glassButton.subviews.isEmpty,
+                    "repeated all-disabled effect frames never recreate a glass host")
+        glassController.applyMenuBarImage(nil, to: glassButton)
+        verifyGlass(glassButton.image == nil && glassController.glassSizingImage == nil,
+                    "nil images leave no stale image or sizing cache")
+        print("PASS: \(glassAssertions) native-glass lifecycle/frame assertions with real extracted view and apply function")
         print("PASS: exact update/prime/adapt functions, real renderer, fake coordinates; no real GUI")
     }
