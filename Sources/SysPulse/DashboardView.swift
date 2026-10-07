@@ -154,7 +154,8 @@ struct DashboardView: View {
                 Text(fraction.map { Format.percent($0) } ?? "--")
                     .font(.system(size: 28, weight: .medium))
                     .monospacedDigit()
-                    .foregroundStyle(fraction.map { palette.metricColor($0) } ?? palette.secondary)
+                    .foregroundStyle(palette.readingColor(kind, fraction: fraction,
+                                                          memoryPressure: snapshot.memoryPressure))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(detail)
                     .font(.system(size: 10.5))
@@ -175,7 +176,7 @@ struct DashboardView: View {
         }
         .buttonStyle(PanelPressButtonStyle())
         .help(detailDescription(kind))
-        .accessibilityLabel("\(kind.rawValue)，\(fraction.map { Format.percent($0) } ?? "尚未就绪")，\(detail)")
+        .accessibilityLabel("\(kind.rawValue)，\(fraction.map { Format.percent($0) } ?? "尚未就绪")，\(detail)\(kind == .memory ? "，压力：" + snapshot.memoryPressure.title : "")")
         .accessibilityHint("展开详细信息")
         .accessibilityIdentifier("panel.metric.\(kind)")
     }
@@ -268,7 +269,7 @@ struct DashboardView: View {
             if let memory = snapshot.gpuMemory { parts.append("GPU 内存 \(Format.bytes(memory))") }
             return parts.isEmpty ? "实时利用率" : parts.joined(separator: " · ")
         case .memory:
-            return "已用 \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal)) · 交换 \(Format.bytes(snapshot.swapUsed))"
+            return "压力：\(snapshot.memoryPressure.title) · 已用 \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal)) · 交换 \(Format.bytes(snapshot.swapUsed))"
         case .network:
             return "本次运行接收 \(Format.bytes(snapshot.totalDown)) · 发送 \(Format.bytes(snapshot.totalUp))"
         }
@@ -519,7 +520,7 @@ struct DashboardView: View {
 }
 
 /// 中性清透磨砂；四项指标分别使用青绿、紫罗兰、赭金与湖蓝。
-private struct PanelPalette {
+struct PanelPalette {
     let transparency: Double
     var surface: Color { Color(red: 235 / 255, green: 238 / 255, blue: 240 / 255) }
     var softWhite: Color { Color(red: 245 / 255, green: 247 / 255, blue: 249 / 255) }
@@ -541,6 +542,22 @@ private struct PanelPalette {
         case .gpu: return Color(red: 126 / 255, green: 99 / 255, blue: 165 / 255)
         case .memory: return Color(red: 166 / 255, green: 120 / 255, blue: 47 / 255)
         case .network: return Color(red: 53 / 255, green: 123 / 255, blue: 157 / 255)
+        }
+    }
+    func readingColor(_ kind: DashboardDetail, fraction: Double?, memoryPressure: MemoryPressure) -> Color {
+        guard let fraction else { return secondary }
+        switch kind {
+        case .cpu: return metricColor(fraction)
+        case .gpu: return primary // 满载可能是正常工作，不按占用率告警。
+        case .memory: return memoryColor(memoryPressure)
+        case .network: return primary
+        }
+    }
+    func memoryColor(_ pressure: MemoryPressure) -> Color {
+        switch pressure {
+        case .normal, .unknown: return primary
+        case .warning: return warning
+        case .critical: return critical
         }
     }
     func metricColor(_ fraction: Double) -> Color {

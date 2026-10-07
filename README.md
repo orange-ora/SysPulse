@@ -4,18 +4,18 @@
 
 原生 Swift + SwiftUI，无第三方依赖、无网络请求、不收集数据。常驻菜单栏，不占程序坞。
 
-**v1.1.0（2026-10-07）**：新的双列指标面板、独立设置页、原生玻璃外观、炫彩菜单栏文字和更轻的点按与横滑动画。详见 [更新记录](<CHANGELOG.md>) 与 [完整更新报告](<docs/UPDATE-v1.1.0.md>)。
+**v1.1.1（2026-10-08）**：内存数字按系统压力告警，GPU 高占用保持正常文字色，避免将资源占用率误当成异常状态。沿用 v1.1.0 的原生玻璃面板与设置。详见 [更新记录](<CHANGELOG.md>) 与 [完整更新报告](<docs/UPDATE-v1.1.1.md>)。
 
 <p align="center">
   <img src="docs/panel.png" width="360" alt="新版指标面板：CPU、GPU、内存、网络双列卡片，设备信息、绿色显示开关和连续光效选择栏">
   <img src="docs/settings.png" width="360" alt="显示与外观设置：刷新频率、菜单栏排版、71% 玻璃通透度、开机启动和恢复显示默认值">
 </p>
 
-以上为本轮代码在 macOS 上的真实窗口截图；读数、设备信息、玻璃透出的桌面背景随机器和时间变化。
+主面板与设置页沿用 v1.1.0 的真实窗口截图；本版内存压力详情截图见下文。读数、设备信息、玻璃透出的桌面背景随机器和时间变化。
 
 ## 下载与安装
 
-**[下载 SysPulse-1.1.0.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.1.0/SysPulse-1.1.0.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.1.0/SysPulse-1.1.0.dmg.sha256)
+**[下载 SysPulse-1.1.1.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.1.1/SysPulse-1.1.1.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.1.1/SysPulse-1.1.1.dmg.sha256)
 
 支持 **macOS 14.0+、Apple Silicon 和 Intel**，安装包包含 `arm64` 与 `x86_64` 两种架构，正常运行不需要 Rosetta。
 
@@ -31,13 +31,13 @@
 
 - **CPU**：总占用、用户 / 系统占比、核心数和历史曲线。
 - **GPU**：驱动提供的利用率、核心数、GPU 内存与曲线；未就绪与机型未提供计数器分别显示。
-- **内存**：占用比例、已用 / 总容量、交换分区与曲线。
+- **内存**：占用比例、已用 / 总容量、系统内存压力、交换分区与曲线；数字颜色按压力状态告警，与占用比例独立。
 - **网络**：下行 / 上行速度、实线 / 虚线双曲线和本次运行累计流量。
 - **点击卡片展开详情**：主面板保持紧凑，额外信息按需查看。
 - **设备信息**：自动读取当前 Mac 的机型、处理器、CPU / GPU 核心数和物理内存。Apple Silicon 显示统一内存；Intel 在系统提供 DIMM 字段时显示容量与类型组合，不推测未公开的插槽。
 
 <p align="center">
-  <img src="docs/memory-detail.png" width="360" alt="内存卡片展开后的真实详情面板">
+  <img src="docs/memory-pressure-detail.png" width="360" alt="内存卡片展开后的真实详情面板">
 </p>
 
 曲线保留 **60 个采样点**，跨度随刷新周期变化；默认 2 秒刷新时约为 2 分钟。百分比曲线使用固定 0–100% 量程，网络曲线按当前量级显示。
@@ -75,7 +75,7 @@ macOS 26+ 使用原生 **Liquid Glass**；macOS 14 / 15 使用 `NSVisualEffectVi
 - 各数值槽按最宽可能值预留空间，读数变化时避免宽度跳动。
 - 悬停显示完整指标，包括网络上行速度。
 - 所有指标关闭时显示脉搏占位图标。
-- 百分比达到 80% 变橙、92% 变红；**炫彩模式的菜单栏文字始终保持冷色渐变**，此时请在面板查看负载告警颜色。
+- CPU 占用达到 80% 变橙、92% 变红。GPU 数字保持正常文字色，百分比和紫色曲线表达负载，高占用不直接代表异常。内存数字按系统压力着色：正常保持原文字色，警告变橙，严重变红；未知使用中性色并在提示中标明。**炫彩模式的菜单栏文字始终保持冷色渐变**，此时请在面板查看告警颜色。
 
 四种光效互斥，动画沿用 10 fps；显示器休眠、锁屏或屏保时自动挂起。
 
@@ -97,6 +97,7 @@ macOS 26+ 使用原生 **Liquid Glass**；macOS 14 / 15 使用 `NSVisualEffectVi
 | CPU | `host_processor_info(PROCESSOR_CPU_LOAD_INFO)`，逐核 tick 差分 |
 | GPU | IOKit `IOAccelerator` 的 `PerformanceStatistics` |
 | 内存 / 交换分区 | `host_statistics64(HOST_VM_INFO64)` / `sysctl vm.swapusage` |
+| 内存压力 | `sysctl kern.memorystatus_vm_pressure_level`，读取系统正常 / 警告 / 严重三态 |
 | 网络 | `sysctl(NET_RT_IFLIST2)`，按物理 `en*` 接口计算字节增量 |
 | 运行时长 / 进程数 | `systemUptime` / `sysctl KERN_PROC_ALL` |
 | 设备信息 | sysctl 回退 + 启动时一次后台 `system_profiler` 查询 |
@@ -104,6 +105,8 @@ macOS 26+ 使用原生 **Liquid Glass**；macOS 14 / 15 使用 `NSVisualEffectVi
 网速使用十进制单位（`M = 1000²`），统计物理网卡总流量，排除回环、VPN 等虚拟接口以避免重复计数，不按进程拆分。累计流量表示本次应用运行期间可信采样的总量。
 
 GPU 利用率和核心数依赖驱动，部分 Intel 或其他机型可能不提供。缺值会显示等待或不可用，后续有效数据可恢复。Apple Silicon 上的 GPU 内存属于统一内存，不能理解为独立显存。
+
+内存压力读取系统三态，不把占用率或交换容量换算为压力，也不重现活动监视器的压力曲线。该 sysctl 选择器不是 Apple 承诺稳定的公开接口；每轮采样检查读取结果与四字节长度，不支持、读取失败或未知值时明确显示“未知”，不沿用旧告警。
 
 实际运行验证环境为 **Apple M5 / macOS 27.2**。两种架构均完成构建与签名校验；尚未在 Intel 或 macOS 14 / 15 实机完成运行验收。新版玻璃与炫彩的性能没有单独重新测量，旧版开销记录保留在 [开发笔记](<README.dev.md>)，不作为新版性能保证。
 
@@ -143,7 +146,9 @@ python3 Tools/Regression/BuildPackagingTests.py
 bash Tools/PanelProbe/run.sh   # 隔离偏好和登录项的原生界面验证
 ```
 
-本轮生产回归 117 项断言、24 个控制器场景、40 项原生玻璃生命周期与帧断言以及 64 项受控打包检查通过。点按与横滑另验证普通 / 减少动态效果分支共 20 个原生状态；减少动态效果采用隔离环境键注入，未切换真实系统设置。详细范围见 [更新报告](<docs/UPDATE-v1.1.0.md>)。
+v1.1.1 统一验证通过 201 项生产断言（相较 v1.1.0 新增 84 项）、24 个控制器场景、40 项原生玻璃生命周期与帧断言、64 项受控打包检查，以及 10 种原生面板状态和设置交互。新增检查覆盖系统压力映射、失败与恢复、实际面板配色选择，以及两种外观 / 三种排版的菜单栏真实渲染：99% 内存占用且压力正常不告警，40% 占用且压力严重告警，GPU 80% / 100% 保持正常文字色，CPU 仍保留阈值，炫彩仍保留冷色渐变。警告和严重压力通过隔离读取夹具验证，不对本机制造压力。详细范围见 [v1.1.1 更新报告](<docs/UPDATE-v1.1.1.md>)。
+
+v1.1.0 发布时生产回归 117 项断言、24 个控制器场景、40 项原生玻璃生命周期与帧断言以及 64 项受控打包检查通过。点按与横滑另验证普通 / 减少动态效果分支共 20 个原生状态；减少动态效果采用隔离环境键注入，未切换真实系统设置。详细范围见 [更新报告](<docs/UPDATE-v1.1.0.md>)。
 
 ## 卸载
 

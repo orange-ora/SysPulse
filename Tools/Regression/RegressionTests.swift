@@ -2,6 +2,26 @@ import AppKit
 import Darwin
 import Foundation
 import ServiceManagement
+import SwiftUI
+
+// 只替换内存压力读取结果；不触发系统警告、不改内核状态。
+enum MemoryPressureFixture {
+    static var enabled = false
+    static var level: Int32 = 1
+    static var fail = false
+    static var size = MemoryLayout<Int32>.size
+}
+func sysctlbyname(_ name: UnsafePointer<CChar>, _ old: UnsafeMutableRawPointer?,
+                  _ size: UnsafeMutablePointer<Int>?, _ new: UnsafeMutableRawPointer?,
+                  _ newSize: Int) -> Int32 {
+    if MemoryPressureFixture.enabled, String(cString: name) == "kern.memorystatus_vm_pressure_level" {
+        if MemoryPressureFixture.fail { errno = ENOENT; return -1 }
+        old?.storeBytes(of: MemoryPressureFixture.level, as: Int32.self)
+        size?.pointee = MemoryPressureFixture.size
+        return 0
+    }
+    return Darwin.sysctlbyname(name, old, size, new, newSize)
+}
 
 // Shadow only this module's sysctl calls. All non-process fixtures forward to Darwin.
 // No kernel state is changed. This verifies the original ProcessMonitor implementation.
@@ -45,6 +65,160 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         print("PASS: \(message)")
     }
     static func close(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.00001 }
+
+    static func memoryPressure() {
+        MemoryPressureFixture.enabled = true
+        defer {
+            MemoryPressureFixture.enabled = false
+            MemoryPressureFixture.fail = false
+            MemoryPressureFixture.size = MemoryLayout<Int32>.size
+        }
+        let monitor = SystemMonitor()
+        for (level, expected) in [(Int32(1), MemoryPressure.normal), (2, .warning), (4, .critical)] {
+            MemoryPressureFixture.level = level
+            check(MemoryMonitor.readPressure() == expected, "memory pressure: system level \(level) maps to \(expected.title)")
+            monitor.sampleOnce()
+            check(monitor.snapshot.memoryPressure == expected, "memory pressure: sampler publishes \(expected.title)")
+        }
+        for level in [Int32(0), 3, 5, 6, 7, -1] {
+            MemoryPressureFixture.level = level
+            check(MemoryMonitor.readPressure() == .unknown, "memory pressure: unknown system level \(level) is not inferred")
+        }
+        MemoryPressureFixture.level = 4
+        MemoryPressureFixture.fail = true
+        monitor.sampleOnce()
+        check(monitor.snapshot.memoryPressure == .unknown, "memory pressure: read failure clears previous critical status")
+        MemoryPressureFixture.fail = false
+        MemoryPressureFixture.size = 2
+        check(MemoryMonitor.readPressure() == .unknown, "memory pressure: malformed payload size is rejected")
+        MemoryPressureFixture.size = MemoryLayout<Int32>.size
+        MemoryPressureFixture.level = 1
+        monitor.sampleOnce()
+        check(monitor.snapshot.memoryPressure == .normal, "memory pressure: valid normal status recovers after failed read")
+
+        let palette = PanelPalette(transparency: 0.71)
+        check(palette.memoryColor(.normal) == palette.primary && palette.memoryColor(.unknown) == palette.primary,
+              "memory pressure: panel uses neutral text for normal/unknown")
+        check(palette.memoryColor(.warning) == palette.warning && palette.memoryColor(.critical) == palette.critical,
+              "memory pressure: panel warning/critical colors follow system state")
+        check(StatusItemController.memoryTint(for: .normal) == .labelColor && StatusItemController.memoryTint(for: .unknown) == .labelColor,
+              "memory pressure: menu bar uses neutral text for normal/unknown")
+        check(StatusItemController.memoryTint(for: .warning) == .systemOrange && StatusItemController.memoryTint(for: .critical) == .systemRed,
+              "memory pressure: menu bar warning/critical colors follow system state")
+        check(StatusItemController.tint(for: 0.79) == .labelColor && StatusItemController.tint(for: 0.80) == .systemOrange &&
+              StatusItemController.tint(for: 0.92) == .systemRed,
+              "CPU: existing 80/92 percent warning thresholds remain unchanged")
+
+        let suite = "SysPulse.Regression.MemoryPressure.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = Preferences(defaults: defaults)
+        preferences.showCPU = false
+        preferences.showGPU = false
+        preferences.showNetwork = false
+        preferences.showMemory = true
+        var snapshot = MetricsSnapshot()
+        func image(_ fraction: Double, _ pressure: MemoryPressure, _ density: MenuBarDensity,
+                   _ appearance: NSAppearance, effect: MenuBarEffect = .off) -> NSImage {
+            snapshot.memoryFraction = fraction
+            snapshot.memoryPressure = pressure
+            return MenuBarImage.render(snapshot: snapshot, preferences: preferences,
+                                       appearance: appearance, density: density, effect: effect, effectElapsed: 0)!
+        }
+        func bytes(_ image: NSImage) -> Data { image.tiffRepresentation! }
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = NSAppearance(named: name)!
+            for density in [MenuBarDensity.full, .compact, .minimal] {
+                let highNormal = image(0.99, .normal, density, appearance)
+                let highUnknown = image(0.99, .unknown, density, appearance)
+                let highWarning = image(0.99, .warning, density, appearance)
+                let highCritical = image(0.99, .critical, density, appearance)
+                check(bytes(highNormal) == bytes(highUnknown) && bytes(highNormal) != bytes(highWarning) &&
+                      bytes(highWarning) != bytes(highCritical),
+                      "memory rendering \(name.rawValue)/\(density): 99% is neutral unless system pressure warns")
+                let lowNormal = image(0.40, .normal, density, appearance)
+                let lowCritical = image(0.40, .critical, density, appearance)
+                check(bytes(lowNormal) != bytes(lowCritical),
+                      "memory rendering \(name.rawValue)/\(density): critical pressure warns even at 40% usage")
+                check(highNormal.size == highWarning.size && highWarning.size == highCritical.size &&
+                      lowNormal.size == lowCritical.size,
+                      "memory rendering \(name.rawValue)/\(density): pressure changes preserve layout geometry")
+                let rainbowNormal = image(0.99, .normal, density, appearance, effect: .iridescent)
+                let rainbowCritical = image(0.99, .critical, density, appearance, effect: .iridescent)
+                check(bytes(rainbowNormal) == bytes(rainbowCritical),
+                      "memory rendering \(name.rawValue)/\(density): iridescent retains its chosen cold colors")
+            }
+        }
+        snapshot.memoryPressure = .critical
+        check(MenuBarImage.tooltip(snapshot: snapshot).contains("压力：严重"), "memory pressure: tooltip communicates critical state")
+        snapshot.memoryPressure = .unknown
+        check(MenuBarImage.tooltip(snapshot: snapshot).contains("压力：未知"), "memory pressure: tooltip communicates unknown state")
+    }
+
+    static func metricColors() {
+        let palette = PanelPalette(transparency: 0.71)
+        for fraction in [0.79, 0.80, 0.92, 1.0] {
+            check(palette.readingColor(.gpu, fraction: fraction, memoryPressure: .critical) == palette.primary,
+                  "GPU panel: \(fraction * 100)% stays neutral independently of memory pressure")
+        }
+        check(palette.readingColor(.gpu, fraction: nil, memoryPressure: .normal) == palette.secondary,
+              "GPU panel: missing data retains its secondary text color")
+        check(palette.readingColor(.cpu, fraction: 0.80, memoryPressure: .normal) == palette.warning &&
+              palette.readingColor(.cpu, fraction: 0.92, memoryPressure: .normal) == palette.critical,
+              "CPU panel: warning thresholds remain independent of GPU changes")
+        check(palette.readingColor(.memory, fraction: 0.99, memoryPressure: .normal) == palette.primary &&
+              palette.readingColor(.memory, fraction: 0.99, memoryPressure: .unknown) == palette.primary,
+              "memory panel: 99% usage with normal or unknown pressure stays neutral")
+        check(palette.readingColor(.memory, fraction: 0.40, memoryPressure: .warning) == palette.warning &&
+              palette.readingColor(.memory, fraction: 0.40, memoryPressure: .critical) == palette.critical,
+              "memory panel: low utilization does not mask system warning or critical pressure")
+
+        let suite = "SysPulse.Regression.MetricColors.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = Preferences(defaults: defaults)
+        preferences.showMemory = false
+        preferences.showNetwork = false
+        func render(gpu: Bool, usage: Double, density: MenuBarDensity, appearance: NSAppearance) -> NSImage {
+            preferences.showGPU = gpu
+            preferences.showCPU = !gpu
+            var snapshot = MetricsSnapshot()
+            snapshot.gpuUsage = usage * 100
+            snapshot.cpuUsage = usage
+            snapshot.memoryPressure = .critical
+            return MenuBarImage.render(snapshot: snapshot, preferences: preferences, appearance: appearance,
+                                       density: density, effect: .off)!
+        }
+        // Plain text is achromatic; orange/red glyph pixels verify actual renderer output.
+        func coloredPixels(_ image: NSImage) -> Int {
+            let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
+            var count = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          color.alphaComponent > 0.1 else { continue }
+                    let maximum = max(max(color.redComponent, color.greenComponent), color.blueComponent)
+                    let minimum = min(min(color.redComponent, color.greenComponent), color.blueComponent)
+                    if maximum - minimum > 0.12 { count += 1 }
+                }
+            }
+            return count
+        }
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = NSAppearance(named: name)!
+            for density in [MenuBarDensity.full, .compact, .minimal] {
+                let gpu80 = render(gpu: true, usage: 0.80, density: density, appearance: appearance)
+                let gpu100 = render(gpu: true, usage: 1.0, density: density, appearance: appearance)
+                check(coloredPixels(gpu80) == 0, "GPU rendering \(name.rawValue)/\(density): 80% has no warning color")
+                check(coloredPixels(gpu100) == 0, "GPU rendering \(name.rawValue)/\(density): 100% has no warning color")
+                check(gpu80.size == gpu100.size, "GPU rendering \(name.rawValue)/\(density): full utilization preserves width")
+                check(coloredPixels(render(gpu: false, usage: 0.80, density: density, appearance: appearance)) > 0,
+                      "CPU rendering \(name.rawValue)/\(density): 80% still has its warning color")
+                check(coloredPixels(render(gpu: false, usage: 1.0, density: density, appearance: appearance)) > 0,
+                      "CPU rendering \(name.rawValue)/\(density): 100% still has its critical color")
+            }
+        }
+    }
 
     static func network() {
         let a = NetworkInterfaceID(index: 1, name: "en0", linkAddress: [1, 2])
@@ -508,6 +682,8 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
     static func main() {
         precondition(Bundle.main.bundleIdentifier != "com.local.syspulse",
                      "Regression tests must run as a raw isolated executable, never the installed app.")
+        memoryPressure()
+        metricColors()
         network()
         networkParser()
         gpu()

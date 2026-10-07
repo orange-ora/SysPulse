@@ -614,20 +614,23 @@ enum MenuBarImage {
         /// 带标签指标统一使用的槽位前缀（如 `CPU `），用来跨行对齐
         let percentPrefix = density == .minimal ? "" : "CPU "
 
-        func metric(_ label: String, _ value: Double) -> Segment {
+        func metric(_ label: String, _ value: Double, color: NSColor? = nil) -> Segment {
             let number = String(Int((min(max(value, 0), 1) * 100).rounded()))
             let prefix = density == .minimal ? "" : label + " "
             return Segment(
                 text: prefix + number,
-                color: StatusItemController.tint(for: value),
+                color: color ?? StatusItemController.tint(for: value),
                 weight: metricWeight,
                 slot: prefix + percentSlot
             )
         }
 
         let cpu = preferences.showCPU ? metric("CPU", snapshot.cpuUsage) : nil
-        let gpu = (preferences.showGPU ? snapshot.gpuUsage : nil).map { metric("GPU", $0 / 100) }
-        let memory = preferences.showMemory ? metric("MEM", snapshot.memoryFraction) : nil
+        let gpu = (preferences.showGPU ? snapshot.gpuUsage : nil).map {
+            metric("GPU", $0 / 100, color: .labelColor)
+        }
+        let memory = preferences.showMemory ? metric("MEM", snapshot.memoryFraction,
+                                                     color: StatusItemController.memoryTint(for: snapshot.memoryPressure)) : nil
 
         /// 用固定间隔把若干段拼成一行，空段自动跳过。
         /// `columnSlots` 可以给某一列指定统一的槽位宽度，用来让多行的同一列左右对齐。
@@ -668,7 +671,7 @@ enum MenuBarImage {
         var lines: [String] = []
         lines.append("网速  ↓\(Format.speed(snapshot.downSpeed))  ↑\(Format.speed(snapshot.upSpeed))")
         lines.append("CPU   \(Format.percent(snapshot.cpuUsage))（\(snapshot.cpuCores) 核）")
-        lines.append("内存  \(Format.percent(snapshot.memoryFraction))  \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal))")
+        lines.append("内存  \(Format.percent(snapshot.memoryFraction))  \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal))  压力：\(snapshot.memoryPressure.title)")
         if let gpu = snapshot.gpuUsage {
             lines.append("GPU   \(Format.percent(gpu / 100))")
         }

@@ -22,6 +22,7 @@ enum DumpMode {
             print("GPU         : 不可用")
         }
         print("内存        : \(Format.percent(snapshot.memoryFraction, decimals: 1))  已用 \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal))  交换 \(Format.bytes(snapshot.swapUsed))")
+        print("内存压力    : \(snapshot.memoryPressure.title)")
         print("网络下行    : \(Format.speed(snapshot.downSpeed))")
         print("网络上行    : \(Format.speed(snapshot.upSpeed))")
         print("本次运行流量: 接收 \(Format.bytes(snapshot.totalDown)) / 发送 \(Format.bytes(snapshot.totalUp))")

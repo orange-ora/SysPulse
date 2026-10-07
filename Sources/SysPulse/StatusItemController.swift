@@ -870,7 +870,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     // MARK: -
 
-    /// 占用越高颜色越警示，平时保持系统主色以适配浅色 / 深色菜单栏。
+    /// 内存按系统压力告警；正常与未知保留主色，不用占用率推断压力。
+    static func memoryTint(for pressure: MemoryPressure) -> NSColor {
+        switch pressure {
+        case .normal, .unknown: return .labelColor
+        case .warning: return .systemOrange
+        case .critical: return .systemRed
+        }
+    }
+
+    /// CPU 占用越高颜色越警示，平时保持系统主色以适配浅色 / 深色菜单栏。
     static func tint(for fraction: Double) -> NSColor {
         switch fraction {
         case ..<0.80: return .labelColor

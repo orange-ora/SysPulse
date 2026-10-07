@@ -102,6 +102,7 @@ final class SystemMonitor: ObservableObject {
         next.memoryUsed = memory.used
         next.memoryTotal = memory.total
         next.memoryFraction = memory.total > 0 ? Double(memory.used) / Double(memory.total) : 0
+        next.memoryPressure = memory.pressure
         next.swapUsed = memory.swapUsed
         next.downSpeed = network.downSpeed
         next.upSpeed = network.upSpeed

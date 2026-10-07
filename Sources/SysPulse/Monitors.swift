@@ -20,6 +20,7 @@ struct MetricsSnapshot {
     var memoryUsed: UInt64 = 0
     var memoryTotal: UInt64 = 0
     var memoryFraction: Double = 0
+    var memoryPressure: MemoryPressure = .unknown
     var swapUsed: UInt64 = 0
 
     var downSpeed: Double = 0
@@ -107,6 +108,30 @@ final class CPUMonitor {
 
 // MARK: - 内存
 
+/// 系统内存压力等级，与占用百分比独立。sysctl 返回 dispatch 的 1/2/4，
+/// 不是 XNU 内部 memorystatus 的 0/1/2/3；失败或未知值不猜测为正常。
+enum MemoryPressure: Equatable {
+    case unknown, normal, warning, critical
+
+    init(systemLevel: Int32) {
+        switch systemLevel {
+        case 1: self = .normal
+        case 2: self = .warning
+        case 4: self = .critical
+        default: self = .unknown
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .unknown: return "未知"
+        case .normal: return "正常"
+        case .warning: return "警告"
+        case .critical: return "严重"
+        }
+    }
+}
+
 /// 读取 Mach VM 统计，按「活跃 + 联动 + 压缩」估算已用内存（与活动监视器口径接近）。
 final class MemoryMonitor {
     private let pageSize = UInt64(vm_kernel_page_size)
@@ -114,8 +139,19 @@ final class MemoryMonitor {
     private(set) var used: UInt64 = 0
     private(set) var total: UInt64 = 0
     private(set) var swapUsed: UInt64 = 0
+    private(set) var pressure: MemoryPressure = .unknown
+
+    static func readPressure() -> MemoryPressure {
+        var level: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) == 0,
+              size == MemoryLayout<Int32>.size else { return .unknown }
+        return MemoryPressure(systemLevel: level)
+    }
 
     func sample() {
+        // 独立读取；VM 统计失败也不影响压力状态，读取失败不沿用旧告警。
+        pressure = Self.readPressure()
         total = ProcessInfo.processInfo.physicalMemory
 
         var stats = vm_statistics64()

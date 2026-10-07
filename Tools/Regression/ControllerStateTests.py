@@ -39,10 +39,13 @@ methods = [block(controller, signature) for signature in [
     '    private var ceilingIndex:',
     '    private var currentDensityIndex:',
     '    private func adaptToAvailableSpace(',
+    '    static func memoryTint(',
     '    static func tint(',
 ]]
-metrics = block((REPO / 'Sources/SysPulse/Monitors.swift').read_text(), 'struct MetricsSnapshot')
-(OUTPUT / 'MetricsSnapshot.swift').write_text('import Foundation\n' + metrics + '\n')
+monitors = (REPO / 'Sources/SysPulse/Monitors.swift').read_text()
+metrics = block(monitors, 'struct MetricsSnapshot')
+pressure = block(monitors, 'enum MemoryPressure')
+(OUTPUT / 'MetricsSnapshot.swift').write_text('import Foundation\n' + pressure + '\n' + metrics + '\n')
 scaffold = (HERE / 'ControllerScaffold.swift.in').read_text()
 checks = (HERE / 'ControllerChecks.swift.in').read_text()
 glass_view = block(controller, 'private final class StatusItemGlassView: NSView')
