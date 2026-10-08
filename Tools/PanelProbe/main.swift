@@ -57,6 +57,7 @@ let popoverMode = interactiveMode || CommandLine.arguments.contains("--popover")
 let previewPopover = NSPopover()
 previewPopover.behavior = .applicationDefined
 previewPopover.animates = false
+previewPopover.hasFullSizeContent = true
 let previewItem: NSStatusItem? = popoverMode ? NSStatusBar.system.statusItem(withLength: interactiveMode ? NSStatusItem.variableLength : NSStatusItem.squareLength) : nil
 previewItem?.button?.image = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "SysPulse 验证")
 if interactiveMode {
@@ -80,7 +81,7 @@ func save(_ hosting: NSView, name: String) {
         let destination = output.appendingPathComponent("\(name).png")
         let capture = Process()
         capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        let frame = popoverMode ? window.frame.insetBy(dx: -10, dy: -10) : window.frame
+        let frame = window.frame
         let screenTop = NSScreen.screens.first?.frame.maxY ?? frame.maxY
         let region = "\(Int(frame.minX)),\(Int(screenTop - frame.maxY)),\(Int(frame.width)),\(Int(frame.height))"
         capture.arguments = ["-x", "-R", region, destination.path]
@@ -233,28 +234,40 @@ func render(_ index: Int) {
         makeBoard(names: ["frosted", "clear", "settings"],
                   captions: ["厚磨砂 · 0%", "清透玻璃 · 100%", "玻璃通透 · 完整尺度"],
                   heading: "SysPulse · 玻璃材质实际调节效果", filename: "material-board")
-        try? reports.joined(separator: "\n").write(to: output.appendingPathComponent("layout.txt"), atomically: true, encoding: .utf8)
-        defaults.removePersistentDomain(forName: suite)
-        print("PASS: rendered \(states.count) native panel states; isolated preferences cleaned up")
-        app.terminate(nil)
+        runExtendedNativeChecks {
+            try? reports.joined(separator: "\n").write(to: output.appendingPathComponent("layout.txt"), atomically: true, encoding: .utf8)
+            defaults.removePersistentDomain(forName: suite)
+            print("PASS: rendered \(states.count) original native panel states plus extended interaction coverage; isolated preferences cleaned up")
+            app.terminate(nil)
+        }
         return
     }
     let state = states[index]
     let appearance = NSAppearance(named: state.appearance)!
     app.appearance = appearance
     preferences.panelTransparency = state.transparency
-    let root = DashboardView(monitor: monitor, preferences: preferences, initialPage: state.page, initialDetail: state.detail)
+    let measurement = PanelContentMeasurement()
+    let root = DashboardView(monitor: monitor, preferences: preferences, initialPage: state.page,
+                             initialDetail: state.detail, usesWindowSurface: popoverMode,
+                             naturalSizeDidChange: { measurement.receive($0) })
     let controller = NSHostingController(rootView: AnyView(root))
     controller.sizingOptions = .preferredContentSize
+    controller.safeAreaRegions = []
     let hosting = controller.view
-    let size = hosting.fittingSize
-    guard size.width == 360, size.height > 300, size.height < 650 else { fail("unexpected layout \(state.name): \(size)") }
+    let size = controller.sizeThatFits(in: NSSize(width: 360, height: 1200))
+    controller.preferredContentSize = size
+    guard let panel = PanelContentController(hosting: controller, preferences: preferences) else { fail("production panel container initialization") }
+    measurement.attach(panel)
+    panel.didChangePresentationSize = { previewPopover.contentSize = $0 }
+    guard size.width == 360, size.height > 300, size.height < 800 else { fail("unexpected layout \(state.name): \(size)") }
     app.activate(ignoringOtherApps: true)
     if popoverMode {
         guard let button = previewItem?.button else { fail("status button missing") }
-        previewPopover.appearance = appearance
-        previewPopover.contentViewController = controller
+        previewPopover.appearance = NSAppearance(named: .aqua)
+        previewPopover.contentViewController = panel
+        previewPopover.contentSize = panel.preferredContentSize
         previewPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        panel.prepareFullSizeLayout()
     } else {
         let window = PanelPreviewWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = appearance
@@ -292,9 +305,18 @@ final class InteractivePreview: NSObject, NSApplicationDelegate {
     private let effectStarted = ProcessInfo.processInfo.systemUptime
 
     func start() {
-        let controller = NSHostingController(rootView: DashboardView(monitor: monitor, preferences: preferences))
+        let measurement = PanelContentMeasurement()
+        let root = DashboardView(monitor: monitor, preferences: preferences, usesWindowSurface: true,
+                                 naturalSizeDidChange: { measurement.receive($0) })
+        let controller = NSHostingController(rootView: root)
         controller.sizingOptions = .preferredContentSize
-        previewPopover.contentViewController = controller
+        controller.safeAreaRegions = []
+        controller.preferredContentSize = controller.sizeThatFits(in: NSSize(width: 360, height: 1200))
+        guard let panel = PanelContentController(hosting: controller, preferences: preferences) else { fail("interactive full-window panel") }
+        panel.didChangePresentationSize = { previewPopover.contentSize = $0 }
+        measurement.attach(panel)
+        previewPopover.contentViewController = panel
+        previewPopover.contentSize = panel.preferredContentSize
         previewItem?.button?.target = self
         previewItem?.button?.action = #selector(togglePopover)
         preferenceChanges = preferences.objectWillChange.sink { [weak self] _ in
@@ -327,6 +349,7 @@ final class InteractivePreview: NSObject, NSApplicationDelegate {
         guard let button = previewItem?.button else { fail("interactive status button missing") }
         app.activate(ignoringOtherApps: true)
         previewPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        (previewPopover.contentViewController as? PanelContentController)?.prepareFullSizeLayout()
         DispatchQueue.main.async {
             previewPopover.contentViewController?.view.window?.title = "SysPulse 测试"
             previewPopover.contentViewController?.view.window?.makeKey()
@@ -383,6 +406,17 @@ final class InteractivePreview: NSObject, NSApplicationDelegate {
         defaults.removePersistentDomain(forName: suite)
     }
 }
+
+let nativeBackdrop: NSWindow? = !interactiveMode ? {
+    guard let screen = NSScreen.main else { return nil }
+    let window = PanelPreviewWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.ignoresMouseEvents = true
+    window.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.91, blue: 0.94, alpha: 1)
+    window.level = .normal
+    window.orderFrontRegardless()
+    return window
+}() : nil
 
 let interactivePreview = interactiveMode ? InteractivePreview() : nil
 if let interactivePreview {

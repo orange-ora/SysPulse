@@ -11,6 +11,8 @@ enum DashboardDetail: String { case cpu = "CPU", gpu = "GPU", memory = "内存",
 struct DashboardView: View {
     @ObservedObject var monitor: SystemMonitor
     @ObservedObject var preferences: Preferences
+    let usesWindowSurface: Bool
+    let naturalSizeDidChange: ((CGSize) -> Void)?
     @ObservedObject private var login = LaunchAtLogin.shared
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -18,9 +20,12 @@ struct DashboardView: View {
     @PanelState private var selectedDetail: DashboardDetail?
 
     init(monitor: SystemMonitor, preferences: Preferences,
-         initialPage: DashboardPage = .overview, initialDetail: DashboardDetail? = nil) {
+         initialPage: DashboardPage = .overview, initialDetail: DashboardDetail? = nil,
+         usesWindowSurface: Bool = false, naturalSizeDidChange: ((CGSize) -> Void)? = nil) {
         self.monitor = monitor
         self.preferences = preferences
+        self.usesWindowSurface = usesWindowSurface
+        self.naturalSizeDidChange = naturalSizeDidChange
         _page = State(initialValue: initialPage)
         _selectedDetail = State(initialValue: initialDetail)
     }
@@ -41,7 +46,9 @@ struct DashboardView: View {
 
     var body: some View {
         Group {
-            if #available(macOS 26.0, *), !reduceTransparency {
+            if usesWindowSurface {
+                content
+            } else if #available(macOS 26.0, *), !reduceTransparency {
                 content
                     .background {
                         RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -80,6 +87,8 @@ struct DashboardView: View {
         }
         .padding(14)
         .frame(width: 360)
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { naturalSizeDidChange?($0) }
         .foregroundStyle(palette.primary)
         .tint(palette.accent)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: page)
@@ -87,7 +96,10 @@ struct DashboardView: View {
 
     private var overview: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header.modifier(PanelReadingPlate(palette: palette))
+            header
+                .modifier(PanelReadingPlate(palette: palette))
+                .modifier(PointerCardHover(cornerRadius: 12, borderTint: palette.accent,
+                                           borderOpacity: 0.80, edgeLift: 6))
             metricGrid
             if let detail = selectedDetail {
                 detailPanel(detail)
@@ -96,36 +108,46 @@ struct DashboardView: View {
             metricToggles.modifier(PanelReadingPlate(palette: palette))
             menuBarEffects.modifier(PanelReadingPlate(palette: palette)).padding(.top, 6)
             separator
-            footer.modifier(PanelReadingPlate(palette: palette))
+            footer
+                .modifier(PanelReadingPlate(palette: palette))
+                .padding(.vertical, 6)
+                .modifier(PointerCardHover(cornerRadius: 12, borderTint: palette.accent,
+                                           borderOpacity: 0.80, edgeLift: 9))
+                .padding(.vertical, -6)
         }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 7) {
-                Image(systemName: "waveform.path.ecg")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(palette.accent)
-                Text("SysPulse")
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer(minLength: 8)
-                Button { page = .settings } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 13, weight: .regular))
-                        .frame(width: 26, height: 24)
-                        .contentShape(Rectangle())
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(palette.accent)
+                    Text("SysPulse")
+                        .font(.system(size: 14, weight: .semibold))
                 }
-                .buttonStyle(PanelPressButtonStyle())
-                .foregroundStyle(palette.secondary)
-                .help("显示与外观")
-                .accessibilityLabel("打开显示与外观设置")
-                .accessibilityIdentifier("panel.settings")
+                Text("系统运行 \(Format.uptime(snapshot.uptime)) · \(snapshot.processCount) 进程")
+                    .font(.system(size: 10.5))
+                    .monospacedDigit()
+                    .foregroundStyle(palette.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-            Text("系统运行 \(Format.uptime(snapshot.uptime)) · \(snapshot.processCount) 进程")
-                .font(.system(size: 10.5))
-                .monospacedDigit()
-                .foregroundStyle(palette.secondary)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            Button { page = .settings } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .regular))
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PanelPressButtonStyle())
+            .foregroundStyle(palette.secondary)
+            .help("显示与外观")
+            .accessibilityLabel("打开显示与外观设置")
+            .accessibilityIdentifier("panel.settings")
         }
+        .padding(.vertical, 3)
     }
 
     private var metricGrid: some View {
@@ -174,7 +196,7 @@ struct DashboardView: View {
             .background(tileBackground(kind, selected: selectedDetail == kind))
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(PanelPressButtonStyle())
+        .buttonStyle(PointerCardButtonStyle(tint: palette.metricTint(kind)))
         .help(detailDescription(kind))
         .accessibilityLabel("\(kind.rawValue)，\(fraction.map { Format.percent($0) } ?? "尚未就绪")，\(detail)\(kind == .memory ? "，压力：" + snapshot.memoryPressure.title : "")")
         .accessibilityHint("展开详细信息")
@@ -215,7 +237,7 @@ struct DashboardView: View {
             .background(tileBackground(.network, selected: selectedDetail == .network))
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(PanelPressButtonStyle())
+        .buttonStyle(PointerCardButtonStyle(tint: palette.metricTint(.network)))
         .help(detailDescription(.network))
         .accessibilityLabel("网络，下载 \(Format.speed(snapshot.downSpeed))，上传 \(Format.speed(snapshot.upSpeed))")
         .accessibilityHint("展开本次运行累计流量")
@@ -306,33 +328,13 @@ struct DashboardView: View {
         var processorParts = [device.processorName]
         if snapshot.cpuCores > 0 { processorParts.append("\(snapshot.cpuCores) 核 CPU") }
         if let cores = snapshot.gpuCores { processorParts.append("\(cores) 核 GPU") }
-        return HStack(alignment: .top, spacing: 8) {
-            Image(systemName: device.modelName.localizedCaseInsensitiveContains("book") ? "laptopcomputer" : "desktopcomputer")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(palette.secondary)
-                .frame(width: 17)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(device.modelName)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(palette.primary)
-                Text(processorParts.filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(palette.secondary)
-                Text(device.memoryDescription)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(palette.secondary)
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(palette.tile))
-        .help("设备标识：\(device.modelIdentifier)")
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("设备信息，\(device.modelName)，\(processorParts.joined(separator: "，"))，\(device.memoryDescription)")
-        .accessibilityIdentifier("panel.device")
+        return DeviceInformationCard(
+            modelName: device.modelName,
+            processorDescription: processorParts.filter { !$0.isEmpty }.joined(separator: " · "),
+            memoryDescription: device.memoryDescription,
+            palette: palette
+        )
+        .modifier(PointerCardHover())
     }
 
     private var metricToggles: some View {
@@ -369,7 +371,7 @@ struct DashboardView: View {
             .background(controlBackground(selected: isOn.wrappedValue))
             .contentShape(Rectangle())
         }
-        .buttonStyle(PanelPressButtonStyle())
+        .buttonStyle(PanelControlButtonStyle(tint: palette.controlGreen, selected: isOn.wrappedValue))
         .accessibilityLabel("菜单栏显示\(title)")
         .accessibilityValue(isOn.wrappedValue ? "开启" : "关闭")
         .accessibilityIdentifier("panel.toggle.\(key)")
@@ -492,7 +494,7 @@ struct DashboardView: View {
                     .padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 8).fill(palette.tile))
             }
-            .buttonStyle(PanelPressButtonStyle())
+            .buttonStyle(PointerCardButtonStyle(tint: palette.accent, cornerRadius: 8, edgeLift: 9))
             .help("恢复显示项、刷新频率、排版、菜单栏效果和通透度；保留开机启动设置")
         }
     }
@@ -574,6 +576,110 @@ private struct PanelReadingPlate: ViewModifier {
     }
 }
 
+/// 在固定布局外层追踪鼠标，避免倾斜后边缘反复触发进出，并让内部按钮接收点击。
+private struct PointerCardHover: ViewModifier {
+    var cornerRadius: CGFloat = 10
+    var borderTint: Color = .white
+    var borderOpacity: Double = 0.80
+    var edgeLift: Double = 9
+    var isPressed = false
+    var scalesOnPress = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @PanelState private var isHovered = false
+    @PanelState private var position = CGPoint.zero
+    @PanelState private var cardSize = CGSize.zero
+
+    /// 按目标抬起幅度和实际宽高换算角度，保持四方向对称。
+    private func tilt(_ coordinate: CGFloat, span: CGFloat) -> Double {
+        guard !reduceMotion, !isPressed, span > 0 else { return 0 }
+        return atan2(Double(coordinate) * edgeLift, Double(span) * 0.5)
+    }
+
+    private var highlightCenter: UnitPoint {
+        reduceMotion ? .center : UnitPoint(x: 0.5 + position.x * 0.5, y: 0.5 + position.y * 0.5)
+    }
+
+    func body(content: Content) -> some View {
+        ZStack {
+            content
+                .background {
+                    GeometryReader { geometry in
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(RadialGradient(colors: [.white.opacity(0.55), .white.opacity(0.14), .clear],
+                                                 center: highlightCenter, startRadius: 0,
+                                                 endRadius: max(geometry.size.width * 0.42, geometry.size.height)))
+                            .opacity(isHovered ? 1 : 0)
+                    }
+                    .allowsHitTesting(false)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(RadialGradient(
+                            colors: [borderTint.opacity(borderOpacity), borderTint.opacity(0.08)],
+                            center: highlightCenter, startRadius: 0,
+                            endRadius: max(1, max(cardSize.width, cardSize.height) * 0.65)),
+                            lineWidth: 0.75)
+                        .opacity(isHovered ? 1 : 0)
+                        .allowsHitTesting(false)
+                }
+                .rotation3DEffect(.radians(tilt(position.y, span: cardSize.height)),
+                                  axis: (x: 1, y: 0, z: 0), anchor: .center, perspective: 0.5)
+                .rotation3DEffect(.radians(tilt(-position.x, span: cardSize.width)),
+                                  axis: (x: 0, y: 1, z: 0), anchor: .center, perspective: 0.5)
+                .scaleEffect(reduceMotion || !isPressed || !scalesOnPress ? 1 : 0.985)
+                .brightness(isPressed ? 0.015 : 0)
+                .animation(reduceMotion ? nil :
+                    .interactiveSpring(response: 0.22, dampingFraction: 1, blendDuration: 0), value: position)
+                .animation(.easeOut(duration: reduceMotion ? 0.10 : isHovered ? 0.16 : 0.26), value: isHovered)
+                .animation(reduceMotion ? .easeOut(duration: 0.08) :
+                    .smooth(duration: isPressed ? 0.08 : 0.18, extraBounce: 0), value: isPressed)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .background {
+            GeometryReader { geometry in
+                Color.clear
+                    .onChange(of: geometry.size, initial: true) { _, size in
+                        if cardSize != size { cardSize = size }
+                    }
+            }
+            .allowsHitTesting(false)
+        }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let point):
+                guard cardSize.width > 0, cardSize.height > 0 else { return }
+                if !isHovered { isHovered = true }
+                if !reduceMotion {
+                    position = CGPoint(
+                        x: min(max(point.x / cardSize.width, 0), 1) * 2 - 1,
+                        y: min(max(point.y / cardSize.height, 0), 1) * 2 - 1)
+                }
+            case .ended:
+                isHovered = false
+                position = .zero
+            }
+        }
+        .onDisappear {
+            isHovered = false
+            position = .zero
+        }
+    }
+}
+
+/// 指标卡片的命中区域保持原尺寸，视觉反馈只作用于内部绘制。
+private struct PointerCardButtonStyle: ButtonStyle {
+    let tint: Color
+    var cornerRadius: CGFloat = 12
+    var edgeLift: Double = 9
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .modifier(PointerCardHover(cornerRadius: cornerRadius, borderTint: tint,
+                                       borderOpacity: 0.80, edgeLift: edgeLift,
+                                       isPressed: configuration.isPressed))
+    }
+}
+
 /// 按压只改变绘制，不改变按钮布局。
 private struct PanelPressButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -586,6 +692,20 @@ private struct PanelPressButtonStyle: ButtonStyle {
             .animation(reduceMotion ? .easeOut(duration: 0.08) :
                 .smooth(duration: configuration.isPressed ? 0.08 : 0.18, extraBounce: 0),
                 value: configuration.isPressed)
+    }
+}
+
+/// 紧凑控件共用位置感知悬浮；布局固定，分段选中底板继续独立滑动。
+private struct PanelControlButtonStyle: ButtonStyle {
+    let tint: Color
+    let selected: Bool
+    var scalesContent = true
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .modifier(PointerCardHover(cornerRadius: 6, borderTint: tint,
+                                       borderOpacity: selected ? 0.80 : 0.60, edgeLift: 3,
+                                       isPressed: configuration.isPressed, scalesOnPress: scalesContent))
     }
 }
 
@@ -612,7 +732,8 @@ private struct PanelSegmentedControl<Value: Equatable>: View {
                         .padding(.vertical, 7)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(PanelPressButtonStyle(scalesContent: false))
+                .buttonStyle(PanelControlButtonStyle(tint: palette.accent, selected: selected,
+                                                     scalesContent: false))
                 .help(optionHelp?(option.0) ?? option.1)
                 .accessibilityLabel("\(label)，\(option.1)")
                 .accessibilityValue(selected ? "已选择" : "未选择")
@@ -642,6 +763,41 @@ private struct PanelSegmentedControl<Value: Equatable>: View {
 }
 
 /// 外观从真实 AppKit 视图读取；popover 中 SwiftUI 的 colorScheme 曾与窗口外观不一致。
+/// 覆盖原生弹窗全部轮廓，箭头与正文来自同一层玻璃 / 颜色。
+struct PanelWindowSurface: View {
+    @ObservedObject var preferences: Preferences
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var transparency: Double {
+        Preferences.normalizedPanelTransparency(preferences.panelTransparency)
+    }
+    private var usesClearGlass: Bool { transparency >= 0.65 }
+
+    var body: some View {
+        Group {
+            if #available(macOS 26.0, *), !reduceTransparency {
+                ZStack {
+                    Rectangle().fill(.thickMaterial)
+                        .opacity(pow(max(0, (0.45 - transparency) / 0.45), 2) * 0.85)
+                }
+                .glassEffect(usesClearGlass ? Glass.clear : Glass.regular, in: Rectangle())
+            } else {
+                PanelMaterial().overlay {
+                    PanelPalette(transparency: reduceTransparency ? 0 : transparency)
+                        .surface.opacity(reduceTransparency ? 1 : 0.22 * (1 - transparency))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
+        .environment(\.colorScheme, .light)
+        .preferredColorScheme(.light)
+        .allowsHitTesting(false)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: usesClearGlass)
+    }
+}
+
 private struct PanelMaterial: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = PanelMaterialView()

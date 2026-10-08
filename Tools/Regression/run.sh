@@ -16,7 +16,8 @@ swiftc -swift-version 5 -target "$TEST_TARGET" -warnings-as-errors -module-cache
 SOURCE_FILES=(
     Monitors.swift SystemMonitor.swift Preferences.swift LaunchAtLogin.swift
     Formatting.swift MenuBarImage.swift PanelAnchorAnimation.swift
-    DashboardView.swift StatusItemController.swift SingleInstance.swift
+    DashboardView.swift DeviceInformationCard.swift PanelPresentationAnimation.swift
+    StatusItemController.swift SingleInstance.swift
 )
 SOURCE_ARGS=()
 for source in "${SOURCE_FILES[@]}"; do
@@ -28,7 +29,9 @@ swiftc -O -swift-version 5 -target "$TEST_TARGET" -warnings-as-errors -module-ca
     -I "$TEST_BUILD" -L "$TEST_BUILD" -lServiceManagement \
     -Xlinker -rpath -Xlinker "$TEST_BUILD" \
     "${SOURCE_ARGS[@]}" "$PROJECT_ROOT/Tools/Regression/RegressionTests.swift" \
+    "$PROJECT_ROOT/Tools/Regression/PanelContentChecks.swift" \
     -o "$TEST_BUILD/RegressionTests"
 
 "$TEST_BUILD/RegressionTests"
 python3 "$PROJECT_ROOT/Tools/Regression/ControllerStateTests.py" "$TEST_BUILD/controller"
+python3 "$PROJECT_ROOT/Tools/Regression/PresentationStateTests.py" "$TEST_BUILD/presentation"

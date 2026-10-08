@@ -22,6 +22,7 @@ final class PanelAnchorAnimation {
 
     private var link: CADisplayLink?
     private var startTimestamp: CFTimeInterval = 0
+    private var isRunning = false
 
     init(from: CGFloat, to: CGFloat, duration: CFTimeInterval,
          onFrame: @escaping (CGFloat) -> Void, onFinish: (() -> Void)? = nil) {
@@ -35,18 +36,23 @@ final class PanelAnchorAnimation {
     /// 在指定窗口所在的显示器上起跑。**先摆一次起点**：换档时系统会抢先把面板按中间态
     /// 摆错一次，这一帧要在同一轮 runloop 里被覆盖掉，才不会"先跳一下再滑"。
     func start(in window: NSWindow) {
-        onFrame(from)
+        cancel()
+        startTimestamp = 0
+        isRunning = true
         let link = window.displayLink(target: self, selector: #selector(step(_:)))
-        link.add(to: .main, forMode: .common)
         self.link = link
+        link.add(to: .main, forMode: .common)
+        onFrame(from)
     }
 
     func cancel() {
+        isRunning = false
         link?.invalidate()
         link = nil
     }
 
     @objc private func step(_ link: CADisplayLink) {
+        guard isRunning, self.link === link else { return }
         if startTimestamp == 0 { startTimestamp = link.timestamp }
         let raw = (link.timestamp - startTimestamp) / duration
         let t = min(max(raw, 0), 1)
@@ -54,6 +60,7 @@ final class PanelAnchorAnimation {
         let eased = 1 - pow(1 - t, 3)
         // 最后一帧**精确落到终点**，不要留插值残差（箭头必须对准图标中心）
         onFrame(t >= 1 ? target : from + (target - from) * eased)
+        guard isRunning, self.link === link else { return }
         if t >= 1 {
             cancel()
             onFinish?()

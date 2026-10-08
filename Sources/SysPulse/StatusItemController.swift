@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import QuartzCore
 import SwiftUI
 
 
@@ -19,12 +20,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let preferences = Preferences.shared
     private var cancellables = Set<AnyCancellable>()
     private var outsideClickMonitor: Any?
-    /// 自己维护的开关状态：`popover.isShown` 在**打开**方向会滞后，不能用来判断。
-    /// （⚠️ 实测只有 show 方向异步：`show()` → `popoverDidShow` 约 25~110ms；
-    ///  `performClose()` → `popoverDidClose` 在当前 `animates = false` 下是**同步重入**的，
-    ///  约 10ms 内就在 `performClose` 调用栈里回调完了。这一点是 `pendingToggle`
-    ///  和 `popoverDidClose` 里的顺序为什么现在踩不到坑的原因，改开合动画前先重读这两处。）
+    /// 初次 show 的异步回调和自定义开合动画共用交互状态。
     private var isPanelOpen = false
+    private var presentationAnimation: PanelPresentationAnimation?
+    private var presentationGeneration = 0
+    private var isWaitingForShow = false
+    private weak var preparedPanelWindow: NSWindow?
+    private var preparedPanelAlpha: CGFloat?
+    private var suspendPanelSizing: (() -> Void)?
+    private var restorePanelSizing: (() -> Void)?
+    private var isClosingPresentation = false
+    private var pendingPanelReceipt = false
+    private weak var observedStatusWindow: NSWindow?
+    private var statusWindowObservers: [NSObjectProtocol] = []
+    private var anchorSyncScheduled = false
     /// 上一次看到的状态栏窗口 **x**。
     ///
     /// 为什么只认 x、不认整个 frame：系统换档时**分两段**改状态栏窗口——
@@ -38,10 +47,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var lastStatusWindowFrame: NSRect?
     /// 正在跑的面板位移动画（nil = 没有）
     private var anchorAnimation: PanelAnchorAnimation?
-    /// 面板位移动画时长：0.18 秒（用户 2026-09-16 选定）。
-    /// 实测 13 帧、193~201ms 收敛，所以"换档到位"从 0.07 秒变成**约 0.2 秒**——
-    /// 观感更丝滑，但跟手感略降。这就是上一版把动画回滚掉的原因，这次是用户明确要求加回来的。
-    private let anchorAnimationDuration: CFTimeInterval = 0.18
+    /// 横向位移与长条过渡统一为 0.14 秒，减少拖影和等待感。
+    /// 前版 0.18 秒的实测数据仅作历史参考，不代表当前预览已经验收。
+    private let anchorAnimationDuration: CFTimeInterval = 0.14
     /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
     private var lastRenderedImageWidth: CGFloat?
     /// 引发内容宽度变化的快照身份；同一快照的多个回调仍可能看到窗口中间态。
@@ -153,12 +161,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 紧接着按钮事件才到达，此时 isShown 已经是 false，于是又被重新打开——
         // 表现就是怎么点都关不上。改用 .applicationDefined 自己管外部点击，状态才可控。
         popover.behavior = .applicationDefined
-        // 动画关掉：NSPopover 的动画由系统绘制，帧率观感不佳（发卡），
-        // 而且时长不可调。关掉后展开只要约 110ms，跟手得多。
+        // 保留即时 show / close，原生窗口整体从菜单栏平滑展开与收回。
         popover.animates = false
         popover.delegate = self
         // 面板固定为暖白玻璃；菜单栏读数仍跟随系统外观。
         popover.appearance = NSAppearance(named: .aqua)
+        effectObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    self?.statusItem.button?.layer?.removeAnimation(forKey: "panel.receipt")
+                }
+            })
 
         // 点到别的 App / 桌面就收起。
         // 注意：状态栏项的窗口属于 WindowServer，对全局监听来说也算"别的 App"，
@@ -282,12 +296,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// - Parameter redrawIfStopped: 停下来之后要不要立刻按当前相位补画一次。
     ///   用户手动切成「关闭」时需要（要立刻擦掉背景，见原逻辑）；睡眠/锁屏时不需要。
     private func applyEffectState(redrawIfStopped: Bool) {
+        statusGlassView?.setHoverEnabled(preferences.menuBarEffect != .off && effectSuspendReasons.isEmpty)
         if preferences.menuBarEffect != .off, effectSuspendReasons.isEmpty {
             startEffectTimer()
         } else {
             let wasRunning = effectTimer != nil
             stopEffectTimer()
-            if redrawIfStopped, wasRunning {
+            if redrawIfStopped, wasRunning || preferences.menuBarEffect == .off {
                 updateStatusItem(with: monitor.snapshot)
             }
         }
@@ -299,6 +314,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.effectElapsed += 1.0 / self.effectFramesPerSecond
+            // 开合短暂让出主线程的位图绘制预算，时间相位与系统采样仍照常推进。
+            guard self.presentationAnimation == nil else { return }
             self.updateStatusItem(with: self.monitor.snapshot, allowLayoutChange: false)
         }
         timer.tolerance = interval * 0.1
@@ -321,6 +338,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             distribute.removeObserver(observer)
         }
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        for observer in statusWindowObservers { NotificationCenter.default.removeObserver(observer) }
+        anchorAnimation?.cancel()
+        presentationAnimation?.restore()
     }
 
     /// 判断某个屏幕坐标点是否落在状态栏图标上
@@ -330,6 +350,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         return frameInScreen.contains(point)
     }
 
+    private func menuAnchorRectInScreen() -> NSRect? {
+        guard let button = statusItem.button, let window = button.window else { return nil }
+        return window.convertToScreen(button.convert(button.bounds, to: nil))
+    }
+
     /// 收起面板（外部点击、菜单选项选完都走这里）。
     ///
     /// 注意：菜单项刚被点击时 `NSMenu` 还在收尾，直接 `performClose` **不会失效但也不会
@@ -337,9 +362,43 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 再关，让菜单先收干净。
     func closePopoverIfShown() {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isPanelOpen || self.popover.isShown else { return }
-            self.isPanelOpen = false
-            self.isAnimating = true
+            guard let self else { return }
+            // 外部点击优先收起，清除先前连点的重新打开意图；重复关闭不重启动画。
+            self.pendingToggle = false
+            guard self.isPanelOpen else { return }
+            if self.isWaitingForShow {
+                self.pendingToggle = true
+                return
+            }
+            self.beginClosePresentation()
+        }
+    }
+
+    private func beginClosePresentation() {
+        guard isPanelOpen, !isClosingPresentation else { return }
+        isPanelOpen = false
+        isAnimating = true
+        isClosingPresentation = true
+        presentationGeneration += 1
+        let generation = presentationGeneration
+        anchorAnimation?.cancel()
+        anchorAnimation = nil
+        guard let window = popover.contentViewController?.view.window else {
+            popover.performClose(nil)
+            return
+        }
+        guard popover.contentViewController is PanelContentController,
+              let animation = presentationAnimation ?? PanelPresentationAnimation(popover: popover, window: window, menuAnchor: menuAnchorRectInScreen()) else {
+            popover.performClose(nil)
+            return
+        }
+        window.ignoresMouseEvents = true
+        suspendPanelSizing?()
+        presentationAnimation = animation
+        animation.close { [weak self] in
+            guard let self, self.presentationGeneration == generation,
+                  self.isClosingPresentation else { return }
+            self.pendingPanelReceipt = true
             self.popover.performClose(nil)
         }
     }
@@ -354,39 +413,91 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // MARK: - 交互
 
     @objc private func togglePopover(_ sender: Any?) {
-        // 开合动画进行中，系统会忽略反向操作；这里先记下这次点击的净效果，
-        // 等 popoverDidShow / popoverDidClose 到达时再补上，点击就不会丢。
+        // 开合期间直接从当前状态反向；AppKit 尚未 show 时按净点击次数记账。
         guard !isAnimating else {
-            pendingToggle.toggle()
+            if isClosingPresentation {
+                pendingToggle = false
+                reopenPresentation()
+            } else if isPanelOpen, !isWaitingForShow {
+                pendingToggle = false
+                beginClosePresentation()
+            } else {
+                pendingToggle.toggle()
+            }
             return
         }
         applyToggle()
     }
 
+    private func receivePanelAtMenuBar() {
+        guard effectSuspendReasons.isEmpty,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let button = statusItem.button, button.window?.isVisible == true else { return }
+        button.wantsLayer = true
+        guard let layer = button.layer else { return }
+        let offset = (layer.presentation()?.transform.m42 ?? layer.transform.m42) - layer.transform.m42
+        layer.removeAnimation(forKey: "panel.receipt")
+        let animation = CAKeyframeAnimation(keyPath: "transform.translation.y")
+        animation.values = [offset, 1.2, -0.5, 0.12, 0]
+        animation.keyTimes = [0, 0.26, 0.58, 0.82, 1]
+        animation.duration = 0.26
+        animation.calculationMode = .cubic
+        animation.isAdditive = true
+        animation.timingFunctions = Array(repeating: CAMediaTimingFunction(name: .easeInEaseOut), count: 4)
+        // 字面和背景共同轻移，既有悬浮 / 横移仍在子层，按钮点击区域保持固定。
+        layer.add(animation, forKey: "panel.receipt")
+    }
+
     private func applyToggle() {
         if isPanelOpen {
-            isPanelOpen = false
-            isAnimating = true
-            popover.performClose(nil)
+            beginClosePresentation()
             return
         }
         guard let button = statusItem.button else { return }
+        pendingPanelReceipt = false
+        button.layer?.removeAnimation(forKey: "panel.receipt")
 
         // 面板内容按需创建：NSHostingController + 整个 SwiftUI 视图树（含窗口图层）
         // 实测要占 35MB 左右，而且关掉之后系统也不回收，还会每秒跟着数据重绘。
         // 所以关闭时释放，下次打开再建（历史曲线在 SystemMonitor 里，不受影响）。
         if popover.contentViewController == nil {
             // 设置页保留面板，允许连续调整；外部点击和状态栏按钮仍负责收起。
-            let view = DashboardView(monitor: monitor, preferences: preferences)
+            popover.hasFullSizeContent = true
+            let measurement = PanelContentMeasurement()
+            let view = DashboardView(monitor: monitor, preferences: preferences, usesWindowSurface: true,
+                naturalSizeDidChange: { size in measurement.receive(size) })
+                .background(PanelWindowAttachment { [weak self] window in self?.preparePanelWindow(window) })
             let hosting = NSHostingController(rootView: view)
+            hosting.safeAreaRegions = []
             hosting.sizingOptions = .preferredContentSize
-            popover.contentViewController = hosting
+            if let content = PanelContentController(hosting: hosting, preferences: preferences) {
+                content.didChangePresentationSize = { [weak self, weak content] size in
+                    guard let self, let content, self.popover.contentViewController === content,
+                          self.popover.isShown else { return }
+                    self.popover.contentSize = size
+                }
+                suspendPanelSizing = { [weak content] in content?.suspendSizeUpdates() }
+                restorePanelSizing = { [weak content] in content?.restoreSizeUpdates() }
+                popover.contentViewController = content
+                measurement.attach(content)
+            } else {
+                suspendPanelSizing = nil
+                restorePanelSizing = nil
+                popover.hasFullSizeContent = false
+                hosting.safeAreaRegions = .all
+                hosting.rootView = DashboardView(monitor: monitor, preferences: preferences)
+                    .background(PanelWindowAttachment { [weak self] window in self?.preparePanelWindow(window) })
+                popover.contentViewController = hosting
+            }
         }
 
         // 关键：先激活 App。状态栏 App 平时不是活动 App，否则面板里的第一次点击会被
         // 系统用去「激活 App + 让弹窗成为 key window」，这一次点击不会传给控件。
         isPanelOpen = true
         isAnimating = true
+        isWaitingForShow = true
+        isClosingPresentation = false
+        presentationGeneration += 1
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: anchorRect(for: button), of: button, preferredEdge: .minY)
         // 初始定位用的是当前 frame：观测基准与定位基准一起记账，
@@ -431,6 +542,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     ///   状态，早就过时了。**位移动画是用户明确要求保留的**（"移动丝滑一点"），
     ///   回滚 Q 弹动画时刻意留了下来，别照着这句旧话把它删掉。
     private func syncPanelAnchor() {
+        guard !isAnimating else { return }
         guard let button = statusItem.button, let win = button.window else { return }
         let frame = win.frame
         let xMoved = (lastSeenStatusWindowX != nil && lastSeenStatusWindowX != frame.minX)
@@ -476,7 +588,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// - 重复调用 = **重新定向**：取消旧动画、从当前位置起算新目标，不会和目标打架；
     /// - 已经在目标上（<0.5pt）就什么都不做，避免无意义的动画。
     private func movePanel(arrowTo screenX: CGFloat, button: NSStatusBarButton) {
-        guard isPanelOpen, let panelWindow = popover.contentViewController?.view.window else { return }
+        guard isPanelOpen, !isAnimating, let panelWindow = popover.contentViewController?.view.window else { return }
         let current = panelWindow.frame.midX
         guard abs(current - screenX) > 0.5 else { return }
         // 目标没变就别重启：换档时预测和"x 就位后的精确纠正"会先后提出**同一个**目标，
@@ -488,7 +600,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             to: screenX,
             duration: anchorAnimationDuration,
             onFrame: { [weak self] x in
-                guard let self, let btn = self.statusItem.button else { return }
+                guard let self, self.isPanelOpen, self.popover.isShown,
+                      let btn = self.statusItem.button else { return }
                 self.placePanel(arrowAt: x, button: btn)
             },
             onFinish: { [weak self] in self?.anchorAnimation = nil }
@@ -496,40 +609,123 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         anchorAnimation?.start(in: panelWindow)
     }
 
+    private func preparePanelWindow(_ window: NSWindow) {
+        guard isWaitingForShow, preparedPanelWindow == nil,
+              window === popover.contentViewController?.view.window else { return }
+        preparedPanelWindow = window
+        preparedPanelAlpha = window.alphaValue
+        window.alphaValue = 0
+    }
+
+    private func restorePreparedPanelWindow() {
+        if let alpha = preparedPanelAlpha { preparedPanelWindow?.alphaValue = alpha }
+        preparedPanelWindow = nil
+        preparedPanelAlpha = nil
+    }
+
     func popoverDidShow(_ notification: Notification) {
+        // 位移逐帧调用 show，不能因此重播开合或消费连点。
+        guard isWaitingForShow, isPanelOpen else { return }
+        isWaitingForShow = false
+        guard let window = popover.contentViewController?.view.window else {
+            restorePreparedPanelWindow()
+            finishAnimation()
+            return
+        }
+        window.ignoresMouseEvents = false
+        if let content = popover.contentViewController as? PanelContentController {
+            popover.contentSize = content.prepareFullSizeLayout()
+        }
+        let alpha = preparedPanelWindow === window ? preparedPanelAlpha : nil
+        guard popover.contentViewController is PanelContentController,
+              let animation = PanelPresentationAnimation(popover: popover, window: window, visibleAlpha: alpha, menuAnchor: menuAnchorRectInScreen()) else {
+            restorePreparedPanelWindow()
+            finishAnimation()
+            return
+        }
+        preparedPanelWindow = nil
+        preparedPanelAlpha = nil
+        suspendPanelSizing?()
+        presentationAnimation = animation
+        let generation = presentationGeneration
+        animation.open { [weak self] in self?.finishOpenPresentation(generation: generation) }
+    }
+
+    private func finishOpenPresentation(generation: Int) {
+        guard presentationGeneration == generation, isPanelOpen else { return }
+        presentationAnimation?.restore()
+        presentationAnimation = nil
+        restorePanelSizing?()
         finishAnimation()
     }
 
+    private func reopenPresentation() {
+        guard let animation = presentationAnimation else { pendingToggle.toggle(); return }
+        pendingPanelReceipt = false
+        statusItem.button?.layer?.removeAnimation(forKey: "panel.receipt")
+        isPanelOpen = true
+        isClosingPresentation = false
+        presentationGeneration += 1
+        let generation = presentationGeneration
+        popover.contentViewController?.view.window?.ignoresMouseEvents = false
+        animation.reopen { [weak self] in self?.finishOpenPresentation(generation: generation) }
+    }
+
     func popoverDidClose(_ notification: Notification) {
+        let receive = pendingPanelReceipt && !pendingToggle
+        pendingPanelReceipt = false
         isPanelOpen = false
+        isWaitingForShow = false
+        isClosingPresentation = false
+        presentationGeneration += 1
+        restorePreparedPanelWindow()
+        popover.contentViewController?.view.window?.ignoresMouseEvents = false
+        presentationAnimation?.restore()
+        presentationAnimation = nil
+        restorePanelSizing?()
+        suspendPanelSizing = nil
+        restorePanelSizing = nil
         anchorAnimation?.cancel()
         anchorAnimation = nil
-        // 清掉观测基准：下次打开时重新按当时的窗口算
         lastSeenStatusWindowX = nil
-        // ⚠️ **释放内容必须在 `finishAnimation()` 之前**——顺序反了会踩一个实测确认过的坑：
-        // `finishAnimation()` 会消费 `pendingToggle` 并调用 `applyToggle()`，那是**重新打开面板**
-        // （此时 isPanelOpen 刚被置 false，走的是"打开"分支，会重新建 contentViewController 并 show）。
-        // 如果那句 `popover.contentViewController = nil` 写在它后面（这就是原来的写法），
-        // 就会把刚建好的内容控制器**又抹成 nil**。实测后果：`popover.isShown == true` 而
-        // `contentViewController == nil`，AppKit 随后强制收起这个空弹窗 ——
-        // 表现就是"动画期间连点被吞一次"，正是 pendingToggle 这套记账想避免的事。
-        //
-        // 当前 `animates = false` 下 `popoverDidClose` 是在 `performClose` 调用栈里**同步重入**的
-        // （实测约 10ms），所以关闭窗口期几乎为 0、`pendingToggle` 来不及被置位，这条踩不到；
-        // 但**一旦以后把开合动画打开**（`popover.animates = true`，README.dev.md 里讨论过），
-        // `popoverDidClose` 就变成异步，这条立刻变成真 bug。所以现在就摆正。
-        // 释放面板视图：不释放的话它会一直跟着数据每秒重绘，
-        // 空闲 CPU 从 0.01% 涨到 0.05%。（窗口本身约 35MB 由 AppKit 持有，
-        // 换掉弹窗对象也回收不了，只能等系统在内存紧张时压缩。）
+        lastStatusWindowFrame = nil
+        // 先释放旧内容，再消费连点；否则会抹掉刚重新创建的内容控制器。
         popover.contentViewController = nil
+        if receive { receivePanelAtMenuBar() }
         finishAnimation()
     }
 
     private func finishAnimation() {
         isAnimating = false
-        guard pendingToggle else { return }
+        guard pendingToggle else {
+            syncPanelAnchor()
+            return
+        }
         pendingToggle = false
         applyToggle()
+    }
+
+    /// 仅观察当前系统状态栏窗口，不把窗口通知送入采样或排版档位判定。
+    private func observeStatusWindow(_ window: NSWindow?) {
+        guard observedStatusWindow !== window else { return }
+        for observer in statusWindowObservers { NotificationCenter.default.removeObserver(observer) }
+        statusWindowObservers.removeAll()
+        observedStatusWindow = window
+        guard let window else { return }
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            let observer = NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                guard let self, !self.anchorSyncScheduled else { return }
+                self.anchorSyncScheduled = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.anchorSyncScheduled = false
+                    self.statusGlassView?.syncScreenPosition()
+                    // 沿用只认 x 的完成判据，宽度中间态不会抢跑面板定位。
+                    self.syncPanelAnchor()
+                }
+            }
+            statusWindowObservers.append(observer)
+        }
     }
 
     // MARK: - 状态栏
@@ -545,6 +741,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     ///   测量值还没稳定就被下一次决策推翻，档位就会 full↔compact↔minimal 无限横跳。
     private func updateStatusItem(with snapshot: MetricsSnapshot, allowLayoutChange: Bool = true) {
         guard let button = statusItem.button else { return }
+        observeStatusWindow(button.window)
 
         // 菜单栏外观跟着壁纸明暗走，状态栏项按钮是最可靠的取样点
         let appearance = button.effectiveAppearance
@@ -616,7 +813,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             appearance: appearance,
             density: densityOrder[index],
             effect: preferences.menuBarEffect,
-            effectElapsed: preferences.menuBarEffect != .off ? effectElapsed : nil
+            effectElapsed: preferences.menuBarEffect != .off ? effectElapsed : nil,
+            includesBackground: false
         )
         // 当前档保留实测最大宽度，完整缓存已在上面的档位决策前建立。
         if widthIsTrustworthy, let width = image?.size.width {
@@ -652,9 +850,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         syncPanelAnchor()
     }
 
-    /// 保留系统按钮的图片尺寸与事件，炫彩的真实材质单独放在按钮内部。
+    /// 保留系统按钮的图片尺寸与点击，非关闭光效共用内部的悬浮内容层。
     private func applyMenuBarImage(_ image: NSImage?, to button: NSStatusBarButton) {
-        guard preferences.menuBarEffect == .iridescent, let image, !image.isTemplate else {
+        guard preferences.menuBarEffect != .off, let image, !image.isTemplate else {
+            statusGlassView?.setHoverEnabled(false)
             statusGlassView?.removeFromSuperview()
             statusGlassView = nil
             glassSizingImage = nil
@@ -667,17 +866,23 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             glassSizingImage = sizingImage
         }
         button.image = glassSizingImage
+        let usesGlass = preferences.menuBarEffect == .iridescent
         let glass: StatusItemGlassView
-        if let existing = statusGlassView {
+        if let existing = statusGlassView, existing.usesGlass == usesGlass {
             glass = existing
         } else {
-            glass = StatusItemGlassView(frame: button.bounds)
+            statusGlassView?.setHoverEnabled(false)
+            statusGlassView?.removeFromSuperview()
+            glass = StatusItemGlassView(frame: button.bounds, usesGlass: usesGlass)
             glass.autoresizingMask = [.width, .height]
             button.addSubview(glass)
             statusGlassView = glass
         }
-        glass.frame = button.bounds
-        glass.setImage(image)
+        if glass.frame != button.bounds { glass.frame = button.bounds }
+        let background = MenuBarImage.background(size: image.size, appearance: button.effectiveAppearance,
+                                                effect: preferences.menuBarEffect, elapsed: effectElapsed)
+        glass.setImage(image, background: background)
+        glass.setHoverEnabled(effectSuspendReasons.isEmpty)
     }
 
     /// 换档那一瞬间就按**预测的最终位置**把面板重新锚定好，抢在"系统用中间态摆错位置"
@@ -711,7 +916,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 拿它当参考就等于复刻系统的错误。万一预测没命中（右边缘真的动了），
     /// `syncPanelAnchor` 还会在 x 就位后再精确纠正一次，所以这里错一点也不会留疤。
     private func reanchorForPredictedResize(previousImageWidth: CGFloat?, newImageWidth: CGFloat?, button: NSStatusBarButton) {
-        guard isPanelOpen,
+        guard isPanelOpen, !isAnimating,
               let previousImageWidth, let newImageWidth,
               abs(newImageWidth - previousImageWidth) > 0.01,
               let reference = lastStatusWindowFrame,
@@ -889,63 +1094,421 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 }
 
-/// 材质嵌在系统状态栏按钮内，不另建窗口，也不接管鼠标点击。
+/// 内容嵌在系统按钮内：炫彩使用玻璃，其他光效保留原图；追踪层不接管点击。
 private final class StatusItemGlassView: NSView {
+    let usesGlass: Bool
     private let imageView: NSImageView
+    private let backgroundImageView: NSImageView
     private let materialView: NSView
+    private let layoutMotionView = NSView(frame: .zero)
+    private let contentView = NSView(frame: .zero)
+    private var lastScreenOriginX: CGFloat?
+    private let hoverReflection = CAGradientLayer()
+    private let reflectionMask = CAShapeLayer()
+    private let hoverHighlight = CAGradientLayer()
+    private let highlightMask = CAShapeLayer()
     private var imageSize = NSSize.zero
+    private var laidOutFrame = NSRect.zero
+    private var hoverTrackingArea: NSTrackingArea?
+    private var hoverEnabled = false
+    private var isHovered = false
+    private var position = CGPoint.zero
+    private var accessibilityObserver: NSObjectProtocol?
 
-    override init(frame frameRect: NSRect) {
+    override convenience init(frame frameRect: NSRect) {
+        self.init(frame: frameRect, usesGlass: true)
+    }
+
+    init(frame frameRect: NSRect, usesGlass: Bool) {
+        self.usesGlass = usesGlass
         let text = NSImageView(frame: .zero)
-        text.imageScaling = .scaleProportionallyDown
+        text.imageScaling = .scaleNone
         text.imageAlignment = .alignCenter
         text.setAccessibilityElement(false)
         imageView = text
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView(frame: .zero)
-            glass.style = .clear
-            glass.tintColor = nil
-            glass.contentView = text
-            materialView = glass
+        let background = NSImageView(frame: .zero)
+        background.imageScaling = .scaleAxesIndependently
+        background.setAccessibilityElement(false)
+        backgroundImageView = background
+        if usesGlass {
+            if #available(macOS 26.0, *) {
+                let glass = NSGlassEffectView(frame: .zero)
+                glass.style = .clear
+                glass.tintColor = nil
+                materialView = glass
+            } else {
+                let frost = NSVisualEffectView(frame: .zero)
+                frost.material = .menu
+                frost.blendingMode = .behindWindow
+                frost.state = .active
+                frost.wantsLayer = true
+                frost.layer?.masksToBounds = true
+                materialView = frost
+            }
         } else {
-            let frost = NSVisualEffectView(frame: .zero)
-            frost.material = .menu
-            frost.blendingMode = .behindWindow
-            frost.state = .active
-            frost.wantsLayer = true
-            frost.layer?.masksToBounds = true
-            frost.addSubview(text)
-            materialView = frost
+            materialView = background
         }
         super.init(frame: frameRect)
         setAccessibilityElement(false)
-        addSubview(materialView)
+        wantsLayer = true
+        layer?.masksToBounds = false
+        contentView.setAccessibilityElement(false)
+        contentView.wantsLayer = true
+        contentView.layer?.masksToBounds = false
+        layoutMotionView.wantsLayer = true
+        layoutMotionView.layer?.masksToBounds = false
+        layoutMotionView.setAccessibilityElement(false)
+        addSubview(layoutMotionView)
+        layoutMotionView.addSubview(contentView)
+        contentView.addSubview(materialView)
+        materialView.wantsLayer = true
+        imageView.wantsLayer = true
+        contentView.addSubview(imageView)
+
+        // 反光位于字形下方，边缘亮线独立描画；不使用悬浮阴影或放大。
+        hoverReflection.type = .radial
+        hoverReflection.colors = [NSColor.white.withAlphaComponent(0.20).cgColor,
+                                  NSColor.white.withAlphaComponent(0.06).cgColor,
+                                  NSColor.clear.cgColor]
+        hoverReflection.locations = [0, 0.45, 1]
+        hoverReflection.opacity = 0
+        reflectionMask.fillColor = NSColor.white.cgColor
+        hoverReflection.mask = reflectionMask
+        if let textLayer = imageView.layer {
+            contentView.layer?.insertSublayer(hoverReflection, below: textLayer)
+        }
+        hoverHighlight.type = .radial
+        hoverHighlight.colors = [NSColor.white.withAlphaComponent(0.80).cgColor,
+                                 NSColor.white.withAlphaComponent(0.08).cgColor,
+                                 NSColor.clear.cgColor]
+        hoverHighlight.locations = [0, 0.45, 1]
+        hoverHighlight.opacity = 0
+        highlightMask.fillColor = NSColor.clear.cgColor
+        highlightMask.strokeColor = NSColor.white.cgColor
+        highlightMask.lineWidth = 0.8
+        hoverHighlight.mask = highlightMask
+        contentView.layer?.addSublayer(hoverHighlight)
+        accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                self?.refreshHover(animated: false, duration: 0)
+                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    self?.resetLayoutMotion()
+                }
+            }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    deinit {
+        if let accessibilityObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver)
+        }
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    func setImage(_ image: NSImage) {
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            resetHover()
+            lastScreenOriginX = nil
+        } else {
+            lastScreenOriginX = convertToScreenOriginX()
+        }
+        updateTrackingAreas()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateBackingScale()
+    }
+
+    func setImage(_ image: NSImage, background: NSImage?) {
         if imageSize != image.size {
             imageSize = image.size
             needsLayout = true
         }
         imageView.image = image
+        backgroundImageView.image = background
+    }
+
+    func setHoverEnabled(_ enabled: Bool) {
+        guard hoverEnabled != enabled else { return }
+        hoverEnabled = enabled
+        if !enabled { resetHover() }
+        layoutSubtreeIfNeeded()
+        updateTrackingAreas()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard hoverEnabled, window != nil else {
+            if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+            hoverTrackingArea = nil
+            return
+        }
+        if hoverTrackingArea == nil {
+            let area = NSTrackingArea(rect: .zero,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways,
+                          .inVisibleRect, .enabledDuringMouseDrag], owner: self, userInfo: nil)
+            addTrackingArea(area)
+            hoverTrackingArea = area
+        }
+        reconcilePointer(animated: true)
+    }
+
+    override func mouseEntered(with event: NSEvent) { samplePointer(event) }
+    override func mouseMoved(with event: NSEvent) { samplePointer(event) }
+    override func mouseExited(with event: NSEvent) {
+        guard hoverEnabled else { return }
+        setHovered(false, point: .zero, animated: true)
+    }
+
+    private func samplePointer(_ event: NSEvent) {
+        guard hoverEnabled else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        setHovered(visibleRect.contains(point), point: point, animated: true)
+    }
+
+    private func reconcilePointer(animated: Bool) {
+        guard hoverEnabled, let window else { resetHover(); return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHovered(visibleRect.contains(point), point: point, animated: animated)
+    }
+
+    private func setHovered(_ hovered: Bool, point: NSPoint, animated: Bool) {
+        let entering = hovered && !isHovered
+        isHovered = hovered
+        if hovered, laidOutFrame.width > 0, laidOutFrame.height > 0 {
+            // 按未变换的布局坐标归一化，避免倾斜改变追踪区域。
+            position = CGPoint(
+                x: min(max((point.x - laidOutFrame.minX) / laidOutFrame.width, 0), 1) * 2 - 1,
+                y: min(max((point.y - laidOutFrame.minY) / laidOutFrame.height, 0), 1) * 2 - 1)
+        } else {
+            position = .zero
+        }
+        refreshHover(animated: animated, duration: hovered ? (entering ? 0.18 : 0.12) : 0.24)
+    }
+
+    private func convertToScreenOriginX() -> CGFloat? {
+        window?.convertToScreen(convert(bounds, to: nil)).minX
+    }
+
+    func syncScreenPosition() {
+        guard let origin = convertToScreenOriginX() else { lastScreenOriginX = nil; return }
+        let previous = lastScreenOriginX
+        lastScreenOriginX = origin
+        guard let previous, abs(previous - origin) > 0.5, hoverEnabled,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let layer = layoutMotionView.layer else { return }
+        var from = layer.presentation()?.transform ?? layer.transform
+        from.m41 += previous - origin
+        animateLayoutMotion(from: from)
+    }
+
+    private func animateLayoutMotion(from: CATransform3D) {
+        guard let layer = layoutMotionView.layer else { return }
+        layer.removeAnimation(forKey: "layout.motion")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.transform = CATransform3DIdentity
+        CATransaction.commit()
+        guard hoverEnabled, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let animation = CABasicAnimation(keyPath: "transform")
+        animation.fromValue = NSValue(caTransform3D: from)
+        animation.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        animation.duration = 0.14
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: "layout.motion")
+    }
+
+    private func resetLayoutMotion() {
+        let geometryLayers: [CALayer?] = [layoutMotionView.layer, materialView.layer, imageView.layer,
+                                        contentView.layer, hoverReflection, reflectionMask,
+                                        hoverHighlight, highlightMask]
+        for layer in geometryLayers {
+            for key in layer?.animationKeys() ?? [] where key.hasPrefix("layout.") {
+                layer?.removeAnimation(forKey: key)
+            }
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layoutMotionView.layer?.transform = CATransform3DIdentity
+        CATransaction.commit()
+    }
+
+    private func resetHover() {
+        resetLayoutMotion()
+        isHovered = false
+        position = .zero
+        contentView.layer?.removeAllAnimations()
+        hoverReflection.removeAllAnimations()
+        hoverHighlight.removeAllAnimations()
+        refreshHover(animated: false, duration: 0)
+    }
+
+    private func refreshHover(animated: Bool, duration: CFTimeInterval) {
+        guard let contentLayer = contentView.layer else { return }
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let active = hoverEnabled && isHovered
+        let pointer = reduced ? CGPoint.zero : position
+        var transform = CATransform3DIdentity
+        if active, !reduced, laidOutFrame.width > 0, laidOutFrame.height > 0 {
+            // 菜单栏高度有限：边缘抬起 1.8 pt，两个方向仍按相同幅度换算。
+            let pitch = atan2(Double(pointer.y) * 1.8, Double(laidOutFrame.height) * 0.5)
+            let yaw = atan2(-Double(pointer.x) * 1.8, Double(laidOutFrame.width) * 0.5)
+            transform.m34 = -1 / 400
+            transform = CATransform3DRotate(transform, CGFloat(pitch), 1, 0, 0)
+            transform = CATransform3DRotate(transform, CGFloat(yaw), 0, 1, 0)
+        }
+        let animates = animated && !reduced
+        animate(contentLayer, keyPath: "transform", to: NSValue(caTransform3D: transform),
+                animated: animates, duration: duration)
+        let center = CGPoint(x: 0.5 + pointer.x * 0.5, y: 0.5 + pointer.y * 0.5)
+        for highlight in [hoverReflection, hoverHighlight] {
+            animate(highlight, keyPath: "startPoint", to: NSValue(point: center),
+                    animated: animates, duration: duration)
+            animate(highlight, keyPath: "endPoint", to: NSValue(point: CGPoint(x: center.x + 0.28, y: center.y + 1)),
+                    animated: animates, duration: duration)
+            animate(highlight, keyPath: "opacity", to: NSNumber(value: active ? 1 : 0),
+                    animated: animates, duration: duration)
+        }
+    }
+
+    /// 从当前显示值过渡到模型值；Core Animation 自行合成帧，不增加重画计时器。
+    private func animate(_ layer: CALayer, keyPath: String, to value: Any,
+                         animated: Bool, duration: CFTimeInterval) {
+        if animated, let current = layer.value(forKeyPath: keyPath) as? NSObject, current.isEqual(value) { return }
+        let from = layer.presentation()?.value(forKeyPath: keyPath) ?? layer.value(forKeyPath: keyPath)
+        let animationKey = "pointer.\(keyPath)"
+        layer.removeAnimation(forKey: animationKey)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.setValue(value, forKeyPath: keyPath)
+        CATransaction.commit()
+        if animated {
+            let animation = CABasicAnimation(keyPath: keyPath)
+            animation.fromValue = from
+            animation.toValue = value
+            animation.duration = duration
+            animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(animation, forKey: animationKey)
+        }
+    }
+
+    private func updateBackingScale() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        hoverReflection.contentsScale = scale
+        reflectionMask.contentsScale = scale
+        hoverHighlight.contentsScale = scale
+        highlightMask.contentsScale = scale
+    }
+
+    private func animateGeometry(_ layer: CALayer?, keyPath: String, from: Any?, to: Any?) {
+        guard let layer else { return }
+        let key = "layout.\(keyPath)"
+        layer.removeAnimation(forKey: key)
+        guard hoverEnabled, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let from, let to else { return }
+        let animation = CABasicAnimation(keyPath: keyPath)
+        animation.fromValue = from
+        animation.toValue = to
+        animation.duration = 0.14
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: key)
     }
 
     override func layout() {
         super.layout()
+        updateBackingScale()
         let width = min(imageSize.width, bounds.width)
         let height = min(imageSize.height, bounds.height)
-        materialView.frame = NSRect(x: (bounds.width - width) / 2,
-                                    y: (bounds.height - height) / 2,
-                                    width: width, height: height)
+        let frame = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2,
+                           width: width, height: height)
+        guard laidOutFrame != frame || imageView.frame.size != imageSize else { return }
+        let previousFrame = laidOutFrame
+        let sourceMotion = layoutMotionView.layer?.presentation() ?? layoutMotionView.layer
+        let sourceContent = contentView.layer?.presentation() ?? contentView.layer
+        let motion = sourceMotion?.transform ?? CATransform3DIdentity
+        let oldBounds = sourceMotion?.bounds ?? layoutMotionView.bounds
+        let oldAnchor = oldBounds.minX + oldBounds.width * (sourceMotion?.anchorPoint.x ?? 0.5)
+        let oldPosition = sourceMotion?.position.x ?? layoutMotionView.frame.midX
+        let oldContentCenter = sourceContent?.position.x ?? previousFrame.midX
+        let displayedCenter = oldPosition + oldContentCenter - oldAnchor + motion.m41
+        let oldWidth = materialView.layer?.presentation()?.bounds.width ?? materialView.bounds.width
+        // 悬浮只移除自己的键，反光和边缘拥有独立布局过渡。
+        let pointerLayers: [CALayer?] = [contentView.layer, hoverReflection, hoverHighlight]
+        for layer in pointerLayers {
+            for key in layer?.animationKeys() ?? [] where key.hasPrefix("pointer.") {
+                layer?.removeAnimation(forKey: key)
+            }
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contentView.layer?.transform = CATransform3DIdentity
+        layoutMotionView.frame = bounds
+        contentView.frame = frame
+        materialView.frame = contentView.bounds
         if #available(macOS 26.0, *), let glass = materialView as? NSGlassEffectView {
             glass.cornerRadius = height / 2
-        } else {
+        } else if usesGlass {
             materialView.layer?.cornerRadius = height / 2
         }
-        imageView.frame = materialView.bounds
+        // 字面用固有尺寸，只居中和平移；系统可裁切，但不把数字挤窄。
+        imageView.frame = NSRect(x: (width - imageSize.width) / 2, y: (height - imageSize.height) / 2,
+                                 width: imageSize.width, height: imageSize.height)
+        hoverReflection.frame = contentView.bounds
+        reflectionMask.frame = contentView.bounds
+        hoverHighlight.frame = contentView.bounds
+        highlightMask.frame = contentView.bounds
+        if width > 0.8, height > 0.8 {
+            reflectionMask.path = CGPath(roundedRect: contentView.bounds,
+                                         cornerWidth: height / 2, cornerHeight: height / 2, transform: nil)
+            highlightMask.path = CGPath(roundedRect: contentView.bounds.insetBy(dx: 0.4, dy: 0.4),
+                                        cornerWidth: height / 2 - 0.4,
+                                        cornerHeight: height / 2 - 0.4, transform: nil)
+        } else {
+            reflectionMask.path = nil
+            highlightMask.path = nil
+        }
+        laidOutFrame = frame
+        CATransaction.commit()
+        if previousFrame.width > 0, oldWidth > 0.8, width > 0.8, height > 0.8,
+           let motionLayer = layoutMotionView.layer {
+            let anchor = motionLayer.bounds.minX + motionLayer.bounds.width * motionLayer.anchorPoint.x
+            var from = CATransform3DIdentity
+            from.m41 = displayedCenter - motionLayer.position.x - (frame.midX - anchor)
+            animateLayoutMotion(from: from)
+            let oldRect = NSRect(x: 0, y: 0, width: oldWidth, height: height)
+            animateGeometry(materialView.layer, keyPath: "bounds", from: NSValue(rect: oldRect),
+                            to: materialView.layer.map { NSValue(rect: $0.bounds) })
+            animateGeometry(hoverHighlight, keyPath: "bounds", from: NSValue(rect: oldRect),
+                            to: NSValue(rect: hoverHighlight.bounds))
+            animateGeometry(highlightMask, keyPath: "bounds", from: NSValue(rect: oldRect),
+                            to: NSValue(rect: highlightMask.bounds))
+            animateGeometry(highlightMask, keyPath: "position",
+                            from: NSValue(point: NSPoint(x: oldWidth / 2, y: height / 2)),
+                            to: NSValue(point: highlightMask.position))
+            let oldBorder = CGPath(roundedRect: oldRect.insetBy(dx: 0.4, dy: 0.4),
+                                   cornerWidth: height / 2 - 0.4, cornerHeight: height / 2 - 0.4, transform: nil)
+            animateGeometry(highlightMask, keyPath: "path", from: oldBorder, to: highlightMask.path)
+            animateGeometry(hoverReflection, keyPath: "bounds", from: NSValue(rect: oldRect),
+                            to: NSValue(rect: hoverReflection.bounds))
+            animateGeometry(reflectionMask, keyPath: "bounds", from: NSValue(rect: oldRect),
+                            to: NSValue(rect: reflectionMask.bounds))
+            animateGeometry(reflectionMask, keyPath: "position",
+                            from: NSValue(point: NSPoint(x: oldWidth / 2, y: height / 2)),
+                            to: NSValue(point: reflectionMask.position))
+            let oldReflection = CGPath(roundedRect: oldRect, cornerWidth: height / 2,
+                                       cornerHeight: height / 2, transform: nil)
+            animateGeometry(reflectionMask, keyPath: "path", from: oldReflection, to: reflectionMask.path)
+        }
+        reconcilePointer(animated: false)
     }
 }

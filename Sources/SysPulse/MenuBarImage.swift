@@ -63,7 +63,8 @@ enum MenuBarImage {
         appearance: NSAppearance?,
         density: MenuBarDensity,
         effect: MenuBarEffect = .off,
-        effectElapsed: Double? = nil
+        effectElapsed: Double? = nil,
+        includesBackground: Bool = true
     ) -> NSImage? {
         let rows = buildRows(snapshot: snapshot, preferences: preferences, density: density)
         guard !rows.isEmpty else {
@@ -190,7 +191,7 @@ enum MenuBarImage {
                     draw(glyphMask: true)
                 }
             } else {
-                drawEffect(size: size, effect: effect, elapsed: effectElapsed)
+                if includesBackground { drawEffect(size: size, effect: effect, elapsed: effectElapsed) }
                 draw()
             }
         }
@@ -199,6 +200,21 @@ enum MenuBarImage {
                 appearance.performAsCurrentDrawingAppearance { drawContent() }
             } else {
                 drawContent()
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    static func background(size: NSSize, appearance: NSAppearance?, effect: MenuBarEffect,
+                           elapsed: Double?) -> NSImage? {
+        guard effect == .glow || effect == .diffuse else { return nil }
+        let image = NSImage(size: size, flipped: false) { _ in
+            if let appearance {
+                appearance.performAsCurrentDrawingAppearance { drawEffect(size: size, effect: effect, elapsed: elapsed) }
+            } else {
+                drawEffect(size: size, effect: effect, elapsed: elapsed)
             }
             return true
         }

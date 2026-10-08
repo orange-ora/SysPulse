@@ -1,0 +1,65 @@
+import AppKit
+import QuartzCore
+
+// Deterministic coordinates and display frames only; no native window/popover/status item.
+private var testClock: CFTimeInterval = 100
+func CACurrentMediaTime() -> CFTimeInterval { testClock }
+final class NSWorkspace {
+    static let shared = NSWorkspace()
+    static let accessibilityDisplayOptionsDidChangeNotification = Notification.Name("fixture.motion")
+    let notificationCenter = NotificationCenter()
+    var accessibilityDisplayShouldReduceMotion = false
+}
+final class FixtureScreen { var maximumFramesPerSecond = 60 }
+final class CADisplayLink: NSObject {
+    var targetTimestamp: CFTimeInterval = 100
+    var timestamp: CFTimeInterval = 100
+    var preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+    private(set) var invalidated = false
+    func invalidate() { invalidated = true }
+    func add(to: RunLoop, forMode: RunLoop.Mode) {}
+}
+final class NSWindow {
+    var frame = NSRect(x: 600, y: 302, width: 386, height: 598)
+    var alphaValue: CGFloat = 1
+    var ignoresMouseEvents = false
+    var screen: FixtureScreen? = FixtureScreen()
+    func setFrame(_ frame: NSRect, display: Bool) { self.frame = frame }
+    func displayLink(target: Any, selector: Selector) -> CADisplayLink { CADisplayLink() }
+}
+class FixtureController { let view = FixtureView() }
+final class FixtureView { var window: NSWindow? }
+final class PanelContentController: FixtureController {
+    var naturalContentSize = NSSize(width: 360, height: 571.5)
+    var contraction: CGFloat = 0
+    func setContraction(_ contraction: CGFloat) { self.contraction = contraction }
+}
+final class NSPopover {
+    var contentSize = NSSize(width: 386, height: 598)
+    var contentViewController: FixtureController?
+    var closes = 0
+    func performClose(_ sender: Any?) { closes += 1 }
+}
+final class FixtureAnchorAnimation { var cancelled = false; func cancel() { cancelled = true } }
+final class FixtureButton { let layer: CALayer? = CALayer() }
+final class FixtureStatusItem { let button: FixtureButton? = FixtureButton() }
+final class StatusItemController: NSObject {
+    let statusItem = FixtureStatusItem()
+    let popover = NSPopover()
+    var isPanelOpen = true
+    var isAnimating = false
+    var isClosingPresentation = false
+    var isWaitingForShow = false
+    var pendingToggle = false
+    var pendingPanelReceipt = false
+    var presentationGeneration = 0
+    var presentationAnimation: PanelPresentationAnimation?
+    var anchorAnimation: FixtureAnchorAnimation?
+    var sizingSuspensions = 0
+    var sizingRestorations = 0
+    var toggleApplications = 0
+    lazy var suspendPanelSizing: (() -> Void)? = { [weak self] in self?.sizingSuspensions += 1 }
+    lazy var restorePanelSizing: (() -> Void)? = { [weak self] in self?.sizingRestorations += 1 }
+    func menuAnchorRectInScreen() -> NSRect? { NSRect(x: 760, y: 910, width: 52, height: 24) }
+    func finishAnimation() { isAnimating = false }
+    func applyToggle() { toggleApplications += 1 }

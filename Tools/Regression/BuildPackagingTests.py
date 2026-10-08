@@ -192,8 +192,8 @@ def workflow_checks():
         check('Fixture release notes' in notes and 'Previous release notes' not in notes, 'CI release notes include only the current version')
         check('https://github.com/fixture/SysPulse/blob/v9.8.7/docs/UPDATE-v9.8.7.md' in notes and
               'https://github.com/fixture/SysPulse/blob/v9.8.7/README.md#下载与安装' in notes and
-              'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/panel.png' in notes and
-              'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/settings.png' in notes,
+              'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/panel-v9.8.7.png' in notes and
+              'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/settings-v9.8.7.png' in notes,
               'CI release report, install links and screenshots use the version tag')
         env['FIXTURE_FAIL'] = 'sign'
         result = subprocess.run(['bash', '-c', package_script], cwd=root, env=env, capture_output=True, text=True, errors='replace')

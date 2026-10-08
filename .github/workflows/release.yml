@@ -80,7 +80,7 @@ jobs:
           notes += current.replace('<docs/UPDATE-v' + version + '.md>', 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/blob/v' + version + '/docs/UPDATE-v' + version + '.md').replace('<README.md#下载与安装>', 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/blob/v' + version + '/README.md#下载与安装') + '\n\n'
           repo = os.environ['GITHUB_REPOSITORY']
           base = 'https://raw.githubusercontent.com/' + repo + '/v' + version + '/docs/'
-          notes += '### 新版界面\n\n![指标面板](' + base + 'panel.png)\n\n![显示与外观设置](' + base + 'settings.png)\n\n'
+          notes += '### 新版界面\n\n![指标面板](' + base + 'panel-v' + version + '.png)\n\n![显示与外观设置](' + base + 'settings-v' + version + '.png)\n\n'
           notes += '[完整更新报告](https://github.com/' + repo + '/blob/v' + version + '/docs/UPDATE-v' + version + '.md)\n'
           Path('release/notes.md').write_text(notes)
           PY

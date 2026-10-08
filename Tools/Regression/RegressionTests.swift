@@ -694,6 +694,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         glow()
         iridescent()
         installationIdentity()
+        panelContentSizing()
         print("\n\(passed) regression assertions passed. No GUI app installation or real login-item changes.")
     }
 }

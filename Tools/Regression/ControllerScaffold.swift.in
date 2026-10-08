@@ -15,6 +15,7 @@ final class NSScreen {
     static let shared = NSScreen()
     static var screens: [NSScreen] { [shared] }
     static var main: NSScreen? { shared }
+    var backingScaleFactor: CGFloat = 2
     var auxiliaryTopRightArea: NSRect? = NSRect(x: 948, y: 0, width: 762, height: 24)
 }
 final class FakeWindow {
@@ -57,5 +58,7 @@ final class StatusItemController {
     private var lastDensityChangeAt: Date?
     private let densityCooldown: TimeInterval = 2.0
     private let densityUpgradeBuffer: CGFloat = 14
+    private var effectSuspendReasons = Set<String>()
+    private func observeStatusWindow(_ window: FakeWindow?) {}
     private func reanchorForPredictedResize(previousImageWidth: CGFloat?, newImageWidth: CGFloat?, button: NSStatusBarButton) {}
     private func syncPanelAnchor() {}

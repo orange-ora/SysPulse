@@ -4,18 +4,18 @@
 
 原生 Swift + SwiftUI，无第三方依赖、无网络请求、不收集数据。常驻菜单栏，不占程序坞。
 
-**v1.1.1（2026-10-08）**：内存数字按系统压力告警，GPU 高占用保持正常文字色，避免将资源占用率误当成异常状态。沿用 v1.1.0 的原生玻璃面板与设置。详见 [更新记录](<CHANGELOG.md>) 与 [完整更新报告](<docs/UPDATE-v1.1.1.md>)。
+**v1.2.0（2026-10-08）**：全部卡片和菜单栏长条统一反光悬浮，取消立体阴影与悬停放大；面板轻量回收并带菜单栏接收回弹，修正设置页自然高度，机器信息新增点击充能彩蛋。详见 [更新记录](<CHANGELOG.md>) 与 [完整更新报告](<docs/UPDATE-v1.2.0.md>)。
 
 <p align="center">
-  <img src="docs/panel.png" width="360" alt="新版指标面板：CPU、GPU、内存、网络双列卡片，设备信息、绿色显示开关和连续光效选择栏">
-  <img src="docs/settings.png" width="360" alt="显示与外观设置：刷新频率、菜单栏排版、71% 玻璃通透度、开机启动和恢复显示默认值">
+  <img src="docs/panel-v1.2.0.png" width="360" alt="新版指标面板：CPU、GPU、内存、网络双列卡片，设备信息、绿色显示开关和连续光效选择栏">
+  <img src="docs/settings-v1.2.0.png" width="360" alt="显示与外观设置：刷新频率、菜单栏排版、71% 玻璃通透度、开机启动和恢复显示默认值">
 </p>
 
-主面板与设置页沿用 v1.1.0 的真实窗口截图；本版内存压力详情截图见下文。读数、设备信息、玻璃透出的桌面背景随机器和时间变化。
+主面板与设置页使用 v1.2.0 的真实原生界面截图；内存压力详情示例沿用 v1.1.1。读数、设备信息和玻璃透出的背景随机器与时间变化。
 
 ## 下载与安装
 
-**[下载 SysPulse-1.1.1.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.1.1/SysPulse-1.1.1.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.1.1/SysPulse-1.1.1.dmg.sha256)
+**[下载 SysPulse-1.2.0.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.2.0/SysPulse-1.2.0.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.2.0/SysPulse-1.2.0.dmg.sha256)
 
 支持 **macOS 14.0+、Apple Silicon 和 Intel**，安装包包含 `arm64` 与 `x86_64` 两种架构，正常运行不需要 Rosetta。
 
@@ -35,6 +35,8 @@
 - **网络**：下行 / 上行速度、实线 / 虚线双曲线和本次运行累计流量。
 - **点击卡片展开详情**：主面板保持紧凑，额外信息按需查看。
 - **设备信息**：自动读取当前 Mac 的机型、处理器、CPU / GPU 核心数和物理内存。Apple Silicon 显示统一内存；Intel 在系统提供 DIMM 字段时显示容量与类型组合，不推测未公开的插槽。
+- **反光悬浮**：卡片和控件随鼠标倾斜，反光与边缘亮线跟随位置变化；点击范围和布局保持固定，取消立体阴影与整块悬停放大。
+- **机器信息彩蛋**：连续点击机器信息栏六下，小电脑轻跳并出现星星和“今天也在努力运行 ✦”；短暂显示后恢复真实信息，不改动指标或设置。
 
 <p align="center">
   <img src="docs/memory-pressure-detail.png" width="360" alt="内存卡片展开后的真实详情面板">
@@ -145,6 +147,8 @@ bash Tools/Regression/run.sh
 python3 Tools/Regression/BuildPackagingTests.py
 bash Tools/PanelProbe/run.sh   # 隔离偏好和登录项的原生界面验证
 ```
+
+v1.2.0 最终验证通过 **222 项生产断言、24 个控制器场景、52 项玻璃生命周期与反光断言、39 项开合 / 反向 / 代次断言、64 项受控打包检查**。保留 10 种原生面板状态与设置交互，并新增 **137 项原生断言与 16 个几何状态**，覆盖真实切页、详情、彩蛋恢复与取消、实际控制器开合 / 收束 / 接收和减少动态效果分支。双架构发布参数编译与真实指标自检通过；具体方法、截图及输入派发限制见 [v1.2.0 更新报告](<docs/UPDATE-v1.2.0.md>)。
 
 v1.1.1 统一验证通过 201 项生产断言（相较 v1.1.0 新增 84 项）、24 个控制器场景、40 项原生玻璃生命周期与帧断言、64 项受控打包检查，以及 10 种原生面板状态和设置交互。新增检查覆盖系统压力映射、失败与恢复、实际面板配色选择，以及两种外观 / 三种排版的菜单栏真实渲染：99% 内存占用且压力正常不告警，40% 占用且压力严重告警，GPU 80% / 100% 保持正常文字色，CPU 仍保留阈值，炫彩仍保留冷色渐变。警告和严重压力通过隔离读取夹具验证，不对本机制造压力。详细范围见 [v1.1.1 更新报告](<docs/UPDATE-v1.1.1.md>)。
 

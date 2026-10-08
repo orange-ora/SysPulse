@@ -13,7 +13,7 @@ swiftc -swift-version 5 -target "$PROBE_TARGET" -warnings-as-errors \
     -emit-module-path "$PROBE_BUILD/ServiceManagement.swiftmodule" \
     -o "$PROBE_BUILD/libServiceManagement.dylib"
 SOURCE_ARGS=()
-for source in Monitors SystemMonitor Preferences LaunchAtLogin Formatting MenuBarImage PanelAnchorAnimation DashboardView StatusItemController SingleInstance; do
+for source in Monitors SystemMonitor Preferences LaunchAtLogin Formatting MenuBarImage PanelAnchorAnimation PanelPresentationAnimation DashboardView DeviceInformationCard StatusItemController SingleInstance; do
     SOURCE_ARGS+=("$PROJECT_ROOT/Sources/SysPulse/$source.swift")
 done
 swiftc -O -swift-version 5 -target "$PROBE_TARGET" -warnings-as-errors \
@@ -21,6 +21,7 @@ swiftc -O -swift-version 5 -target "$PROBE_TARGET" -warnings-as-errors \
     -framework AppKit -framework SwiftUI -framework IOKit \
     -I "$PROBE_BUILD" -L "$PROBE_BUILD" -lServiceManagement \
     -Xlinker -rpath -Xlinker "$PROBE_BUILD" \
-    "${SOURCE_ARGS[@]}" "$PROJECT_ROOT/Tools/PanelProbe/main.swift" \
+    "${SOURCE_ARGS[@]}" "$PROJECT_ROOT/Tools/PanelProbe/NativeVerification.swift" "$PROJECT_ROOT/Tools/PanelProbe/main.swift" \
     -o "$PROBE_BUILD/PanelProbe"
-"$PROBE_BUILD/PanelProbe" "$PROBE_BUILD/preview" --popover "$@"
+mkdir -p "$PROBE_BUILD/isolated-home"
+CFFIXED_USER_HOME="$PROBE_BUILD/isolated-home" "$PROBE_BUILD/PanelProbe" "$PROBE_BUILD/preview" --popover "$@"

@@ -187,13 +187,19 @@
             if !passed { FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8)) }
             precondition(passed, message)
             glassAssertions += 1
+            print("PASS: " + message)
+        }
+        func descendants(of view: NSView) -> [NSView] {
+            view.subviews.flatMap { [$0] + descendants(of: $0) }
         }
         func textView(in host: StatusItemGlassView) -> NSImageView? {
-            guard let material = host.subviews.first else { return nil }
-            if #available(macOS 26.0, *), let glass = material as? NSGlassEffectView {
-                return glass.contentView as? NSImageView
+            descendants(of: host).compactMap { $0 as? NSImageView }.first { $0.image != nil }
+        }
+        func materialView(in host: StatusItemGlassView) -> NSView? {
+            if #available(macOS 26.0, *) {
+                return descendants(of: host).first { $0 is NSGlassEffectView }
             }
-            return material.subviews.first as? NSImageView
+            return descendants(of: host).first { $0 is NSVisualEffectView }
         }
         let glassController = StatusItemController()
         let glassButton = glassController.statusItem.button!
@@ -208,13 +214,13 @@
         verifyGlass(glassButton.image === sizing && sizing.size.width == 106 && !sizing.isTemplate,
                     "iridescent placeholder preserves the renderer width")
         verifyGlass(glyph.image?.size == sizing.size && glyph.image?.isTemplate == false,
-                    "real glyph image is embedded inside the native material")
+                    "real glyph image is embedded inside the native host alongside material")
         host.layout()
-        let material = host.subviews.first!
+        let material = materialView(in: host)!
         let clampedSize = NSSize(width: min(sizing.size.width, glassButton.bounds.width),
                                  height: min(sizing.size.height, glassButton.bounds.height))
-        verifyGlass(material.frame.size == clampedSize && glyph.frame.size == clampedSize &&
-                    glyph.image?.size == sizing.size,
+        verifyGlass(material.frame.size == clampedSize && glyph.frame.size == sizing.size &&
+                    glyph.image?.size == sizing.size && glyph.imageScaling == .scaleNone,
                     "native material stays within button bounds while preserving the intrinsic glyph image")
         verifyGlass(host.frame == glassButton.bounds && host.window == nil,
                     "glass uses the fake button bounds without creating a real window")
@@ -247,18 +253,26 @@
         verifyGlass(glassController.glassSizingImage !== sizing &&
                     glassController.glassSizingImage?.size.width == 215 && glyph.image?.size.width == 215,
                     "density changes resize placeholder and real glyph image together")
+        let beforeHover = glassAssertions
+        host.runReflectionChecks { verifyGlass($0, $1) }
+        print("PASS: \(glassAssertions - beforeHover) reflection-hover assertions")
         glassController.preferences.menuBarEffect = .diffuse
         glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
-        verifyGlass(glassController.statusGlassView == nil && glassController.glassSizingImage == nil,
-                    "switching to diffuse clears glass and sizing caches")
-        verifyGlass(host.superview == nil && glassButton.subviews.isEmpty,
-                    "switching to diffuse removes the real host from its superview")
-        verifyGlass(glassButton.image?.size.width == 215 && glassButton.image?.isTemplate == false,
-                    "diffuse restores the ordinary full-width rendered image")
+        guard let diffuseHost = glassController.statusGlassView else { fatalError("FAIL: diffuse hover host was not created") }
+        verifyGlass(!diffuseHost.usesGlass && glassController.glassSizingImage?.size.width == 215,
+                    "switching to diffuse replaces glass with a correctly-sized non-glass hover host")
+        verifyGlass(host.superview == nil && glassButton.subviews.count == 1 &&
+                    glassButton.subviews.first === diffuseHost,
+                    "switching to diffuse removes the old glass host and attaches only its replacement")
+        let diffuseImages = descendants(of: diffuseHost).compactMap { $0 as? NSImageView }
+        verifyGlass(diffuseImages.count == 2 && diffuseImages.allSatisfy { $0.image?.size.width == 215 },
+                    "diffuse keeps full-width foreground glyphs and effect background separately")
         let ordinaryImage = NSImage(size: NSSize(width: 42, height: 18))
         glassController.applyMenuBarImage(ordinaryImage, to: glassButton)
-        verifyGlass(glassButton.image === ordinaryImage,
-                    "ordinary rendering passes the supplied image through unchanged")
+        verifyGlass(descendants(of: diffuseHost).compactMap { $0 as? NSImageView }.contains {
+                        $0.image === ordinaryImage && $0.imageScaling == .scaleNone
+                    } && glassButton.image?.size == ordinaryImage.size,
+                    "ordinary effect rendering passes the exact supplied glyph to its host and preserves sizing")
         glassController.preferences.menuBarEffect = .iridescent
         glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
         let recreatedHost = glassController.statusGlassView!

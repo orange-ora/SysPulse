@@ -1,0 +1,188 @@
+private var presentationAssertions = 0
+private func verify(_ condition: @autoclosure () -> Bool, _ message: String) {
+    guard condition() else { fatalError("FAIL: " + message) }
+    presentationAssertions += 1
+    print("PASS: " + message)
+}
+private func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.00001 }
+
+extension PanelPresentationAnimation {
+    func drive(_ fraction: Double, on suppliedLink: CADisplayLink? = nil) {
+        guard let frame = suppliedLink ?? link else { return }
+        frame.targetTimestamp = startTimestamp + duration * fraction + (fraction >= 1 ? 0.000001 : 0)
+        frame.timestamp = frame.targetTimestamp - 1.0 / 60
+        step(frame)
+    }
+    static func runFrameChecks() {
+        let window = NSWindow()
+        let resting = window.frame
+        let body = PanelContentController()
+        body.view.window = window
+        let popover = NSPopover()
+        popover.contentViewController = body
+        let anchor = NSRect(x: 760, y: 910, width: 52, height: 24)
+        let animation = PanelPresentationAnimation(popover: popover, window: window, menuAnchor: anchor)!
+        verify(near(animation.entryHeight, 122.5), "presentation: entry includes 96pt real body plus measured chrome")
+        verify(animation.maximumLift == 8, "presentation: closing lift caps at eight points")
+        var opens = 0, closes = 0
+        animation.open { opens += 1 }
+        verify(near(window.frame.height, 122.5) && window.alphaValue == 0,
+               "presentation: open starts with title-height frame and tied initial alpha")
+        verify(window.frame.width == resting.width && window.frame.maxY == resting.maxY,
+               "presentation: open preserves width and top anchor")
+        animation.drive(0.5)
+        verify(near(window.frame.height, (122.5 + resting.height) / 2) && window.alphaValue == 1,
+               "presentation: actual window follows smoothstep midpoint and full alpha")
+        verify(opens == 0, "presentation: completion waits until displayed endpoint")
+        let oldOpen = animation.link!
+        let openProgress = animation.progress
+        animation.close { closes += 1 }
+        verify(oldOpen.invalidated && near(animation.sourceProgress, openProgress),
+               "presentation: closing reverses from current frame and invalidates old display link")
+        verify(animation.targetContraction == 1 && animation.sourceContraction == 0,
+               "presentation: closing contraction starts independently of reveal progress")
+        let beforeStale = window.frame
+        animation.drive(1, on: oldOpen)
+        verify(window.frame == beforeStale && opens == 0 && closes == 0,
+               "presentation: stale old display frame cannot change geometry or complete")
+        animation.drive(0.5)
+        verify(near(window.frame.width, resting.width * 0.94) && near(body.contraction, 0.5),
+               "presentation: closing midpoint contracts six percent horizontally")
+        verify(near(window.frame.maxY, resting.maxY + 4), "presentation: midpoint lift follows same contraction timeline")
+        let closeLink = animation.link!
+        let currentFrame = window.frame
+        let currentContraction = animation.contraction
+        animation.reopen { opens += 1 }
+        verify(closeLink.invalidated && window.frame == currentFrame,
+               "presentation: reopen reverses without snapping back to full width")
+        verify(animation.sourceContraction == currentContraction && animation.targetContraction == 0,
+               "presentation: reopen recovers from current contraction")
+        animation.drive(1)
+        verify(window.frame == resting && body.contraction == 0 && opens == 1 && closes == 0,
+               "presentation: only latest open completes at natural geometry")
+        verify(animation.link == nil, "presentation: completed timeline removes its display link")
+        animation.close { closes += 1 }
+        animation.drive(1)
+        verify(near(window.frame.width, resting.width * 0.88) && near(window.frame.height, 122.5),
+               "presentation: close endpoint contracts twelve percent with real title-height viewport")
+        verify(window.alphaValue == 0 && body.contraction == 1 && closes == 1,
+               "presentation: close completion arrives after invisible contracted endpoint")
+        animation.restore()
+        verify(window.frame == resting && body.contraction == 0 && window.alphaValue == 1 && popover.contentSize == resting.size,
+               "presentation: restore cancels transforms and reinstates full window/content size")
+        animation.open { opens += 1 }
+        animation.drive(0.99)
+        animation.reopen { opens += 1 }
+        verify(animation.duration == 0.10, "presentation: very short remaining reversal keeps minimum tenth-second duration")
+        let cancelledLink = animation.link!
+        animation.restore()
+        animation.drive(1, on: cancelledLink)
+        verify(opens == 1 && cancelledLink.invalidated && window.frame == resting,
+               "presentation: restore cancels pending completion and stale steps")
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion = true
+        animation.close { closes += 1 }
+        verify(closes == 2 && animation.link == nil && window.alphaValue == 1,
+               "presentation: Reduce Motion completes synchronously without timeline")
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion = false
+        animation.close { closes += 1 }
+        animation.drive(0.3)
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion = true
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        verify(closes == 3 && animation.link == nil && window.alphaValue == 0,
+               "presentation: enabling Reduce Motion during close completes once and hides window")
+        animation.restore()
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion = false
+        let invalid = NSPopover()
+        invalid.contentSize = NSSize(width: 0, height: 1)
+        verify(PanelPresentationAnimation(popover: invalid, window: window) == nil,
+               "presentation: invalid natural sizes reject animation instead of making blank fallback")
+        window.screen!.maximumFramesPerSecond = 120
+        animation.open {}
+        verify(animation.link!.preferredFrameRateRange.maximum == 120 &&
+               animation.link!.preferredFrameRateRange.minimum == 60,
+               "presentation: display frame request adapts to high refresh without exceeding native rate")
+        animation.restore()
+        window.screen!.maximumFramesPerSecond = 0
+        animation.open {}
+        verify(animation.link!.preferredFrameRateRange.preferred == 60,
+               "presentation: absent reported refresh safely requests sixty frames")
+        animation.restore()
+    }
+    var pendingCompletion: (() -> Void)? { completion }
+}
+
+extension StatusItemController {
+    static func runGenerationChecks() {
+        let c = StatusItemController()
+        let body = PanelContentController()
+        let window = NSWindow()
+        body.view.window = window
+        c.popover.contentViewController = body
+        let anchor = FixtureAnchorAnimation()
+        c.anchorAnimation = anchor
+        c.beginClosePresentation()
+        let animation = c.presentationAnimation!
+        let firstGeneration = c.presentationGeneration
+        let staleClose = animation.pendingCompletion!
+        verify(!c.isPanelOpen && c.isAnimating && c.isClosingPresentation && firstGeneration == 1,
+               "generation: close marks controller closing and increments generation")
+        verify(window.ignoresMouseEvents && c.sizingSuspensions == 1 && anchor.cancelled && c.anchorAnimation == nil,
+               "generation: close freezes input and natural-size publishing while cancelling horizontal motion")
+        c.beginClosePresentation()
+        verify(c.presentationGeneration == firstGeneration && c.sizingSuspensions == 1,
+               "generation: duplicate close cannot restart timeline")
+        animation.drive(0.4)
+        let reverseFrame = window.frame
+        c.togglePopover(nil)
+        verify(c.isPanelOpen && !c.isClosingPresentation && c.presentationGeneration == 2 && !window.ignoresMouseEvents,
+               "generation: toggle during close reopens immediately and re-enables input")
+        verify(window.frame == reverseFrame && !c.pendingToggle && !c.pendingPanelReceipt,
+               "generation: reverse retains current frame and clears delayed receipt intent")
+        staleClose()
+        verify(c.popover.closes == 0 && !c.pendingPanelReceipt,
+               "generation: stale close callback cannot close newly reopened popover or trigger receipt")
+        c.finishOpenPresentation(generation: firstGeneration)
+        verify(c.presentationAnimation === animation && c.sizingRestorations == 0,
+               "generation: stale open completion cannot restore sizes or release active timeline")
+        animation.drive(1)
+        verify(c.presentationAnimation == nil && c.sizingRestorations == 1 && !c.isAnimating,
+               "generation: current open completion restores natural sizing exactly once")
+        c.beginClosePresentation()
+        c.presentationAnimation!.drive(1)
+        verify(c.popover.closes == 1 && c.pendingPanelReceipt,
+               "generation: only live close endpoint arms receipt and requests native close")
+        let waiting = StatusItemController()
+        waiting.isAnimating = true
+        waiting.isWaitingForShow = true
+        waiting.togglePopover(nil)
+        verify(waiting.pendingToggle && waiting.presentationGeneration == 0,
+               "generation: pre-show click queues a toggle without creating a timeline")
+        waiting.togglePopover(nil)
+        verify(!waiting.pendingToggle, "generation: pre-show paired clicks cancel by parity")
+        let opening = StatusItemController()
+        opening.popover.contentViewController = body
+        opening.isAnimating = true
+        opening.isPanelOpen = true
+        opening.isWaitingForShow = false
+        opening.togglePopover(nil)
+        verify(opening.isClosingPresentation && !opening.pendingToggle,
+               "generation: toggle during an already-shown opening reverses directly to close")
+        opening.presentationAnimation?.restore()
+        let idle = StatusItemController()
+        idle.togglePopover(nil)
+        verify(idle.toggleApplications == 1, "generation: idle toggle delegates once to ordinary application path")
+        let missing = StatusItemController()
+        missing.beginClosePresentation()
+        verify(missing.popover.closes == 1 && missing.presentationAnimation == nil,
+               "generation: missing attached window closes immediately without fake geometry")
+    }
+}
+
+@main struct PresentationEntry {
+    static func main() {
+        setbuf(stdout, nil)
+        PanelPresentationAnimation.runFrameChecks()
+        StatusItemController.runGenerationChecks()
+        print("PASS: \(presentationAssertions) presentation frame/reversal/generation assertions; fake coordinates only")
+    }
+}

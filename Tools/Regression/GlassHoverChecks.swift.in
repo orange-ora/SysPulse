@@ -1,0 +1,48 @@
+extension StatusItemGlassView {
+    func runReflectionChecks(_ verify: (Bool, String) -> Void) {
+        let initialBounds = bounds
+        let glyphSize = imageView.frame.size
+        let reflectedBounds = hoverReflection.bounds
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        setHoverEnabled(true)
+        setHovered(true, point: NSPoint(x: laidOutFrame.maxX, y: laidOutFrame.maxY), animated: false)
+        verify(hoverReflection.opacity == 1 && hoverHighlight.opacity == 1,
+               "hover: reflection and directional edge illuminate together")
+        verify(hoverReflection.startPoint == hoverHighlight.startPoint &&
+               hoverReflection.startPoint == (reduced ? CGPoint(x: 0.5, y: 0.5) : CGPoint(x: 1, y: 1)),
+               "hover: light follows pointer or remains centered with Reduce Motion")
+        func layers(_ layer: CALayer) -> [CALayer] {
+            [layer] + (layer.sublayers ?? []).flatMap { layers($0) }
+        }
+        verify(layers(layer!).allSatisfy { $0.shadowOpacity == 0 }, "hover: every custom menu-bar layer is free of stereoscopic shadow")
+        let transform = contentView.layer!.transform
+        let xLength = sqrt(transform.m11 * transform.m11 + transform.m12 * transform.m12 + transform.m13 * transform.m13)
+        let yLength = sqrt(transform.m21 * transform.m21 + transform.m22 * transform.m22 + transform.m23 * transform.m23)
+        verify(abs(xLength - 1) < 0.00001 && abs(yLength - 1) < 0.00001,
+               "hover: rotation preserves unit scale and adds no whole-strip enlargement")
+        verify(reduced ? CATransform3DIsIdentity(transform) : !CATransform3DIsIdentity(transform),
+               "hover: tilt respects actual Reduce Motion setting")
+        verify(bounds == initialBounds && imageView.frame.size == glyphSize && imageView.imageScaling == .scaleNone,
+               "hover: fixed hit bounds and intrinsic glyph layout survive tilt")
+        let sublayers = contentView.layer!.sublayers!
+        verify(sublayers.firstIndex(of: hoverReflection) != nil &&
+               sublayers.firstIndex(of: hoverReflection)! < sublayers.firstIndex(of: hoverHighlight)! &&
+               imageView.superview === contentView && contentView.subviews.last === imageView,
+               "hover: body reflection precedes edge light and foreground glyph is the final content subview")
+        verify((hoverReflection.mask as? CAShapeLayer)?.path != nil &&
+               (hoverHighlight.mask as? CAShapeLayer)?.path != nil && hoverReflection.bounds == reflectedBounds,
+               "hover: body and edge reflections retain their distinct masks and layout")
+        let lastLight = hoverHighlight.startPoint
+        setHovered(true, point: NSPoint(x: laidOutFrame.minX, y: laidOutFrame.minY), animated: false)
+        verify(reduced ? hoverHighlight.startPoint == lastLight : hoverHighlight.startPoint != lastLight,
+               "hover: opposite corner moves reflection unless motion is reduced")
+        setHoverEnabled(false)
+        verify(hoverReflection.opacity == 0 && hoverHighlight.opacity == 0 && CATransform3DIsIdentity(contentView.layer!.transform),
+               "hover: sleep/off disabling clears light and tilt immediately")
+        verify((contentView.layer!.animationKeys() ?? []).isEmpty &&
+               (hoverReflection.animationKeys() ?? []).isEmpty && (hoverHighlight.animationKeys() ?? []).isEmpty,
+               "hover: disabling removes transient pointer animations")
+        verify(hitTest(NSPoint(x: bounds.midX, y: bounds.midY)) == nil,
+               "hover: reflection layers do not consume status button clicks")
+    }
+}
