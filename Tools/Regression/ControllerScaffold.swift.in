@@ -51,6 +51,9 @@ final class StatusItemController {
     private var didPrimeDensityWidths = false
     private var primedMetricSet: [Bool] = []
     private var lastRenderedImageWidth: CGFloat?
+    private var cachedTextImageKey: TextImageKey?
+    private var cachedTextImage: NSImage?
+    private var tooltipSnapshotTimestamp: Date?
     private var shapeChangeSnapshotTimestamp: Date?
     private var effectElapsed: Double = 0
     private var recentMinX: [CGFloat] = []

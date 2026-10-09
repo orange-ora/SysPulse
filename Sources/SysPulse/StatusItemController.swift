@@ -52,6 +52,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let anchorAnimationDuration: CFTimeInterval = 0.14
     /// 上一次渲染出来的图片宽度。换档时用它和新宽度求差，预测系统改完之后的窗口宽度。
     private var lastRenderedImageWidth: CGFloat?
+    /// 文字层缓存的键与图片，见 `textImage(for:density:appearance:)`
+    private var cachedTextImageKey: TextImageKey?
+    private var cachedTextImage: NSImage?
+    /// 上一次写进 `toolTip` 的采样时间戳；提示文字只由采样决定，同一份采样不必重设
+    private var tooltipSnapshotTimestamp: Date?
     /// 引发内容宽度变化的快照身份；同一快照的多个回调仍可能看到窗口中间态。
     /// 只比较身份，不按时长等待；下一份采样到达后恢复正常升级判定。
     private var shapeChangeSnapshotTimestamp: Date?
@@ -807,15 +812,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
         let index = currentDensityIndex
 
-        let image = MenuBarImage.render(
-            snapshot: snapshot,
-            preferences: preferences,
-            appearance: appearance,
-            density: densityOrder[index],
-            effect: preferences.menuBarEffect,
-            effectElapsed: preferences.menuBarEffect != .off ? effectElapsed : nil,
-            includesBackground: false
-        )
+        let image = textImage(for: snapshot, density: densityOrder[index], appearance: appearance)
         // 当前档保留实测最大宽度，完整缓存已在上面的档位决策前建立。
         if widthIsTrustworthy, let width = image?.size.width {
             densityWidths[index] = max(densityWidths[index], width)
@@ -825,8 +822,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         let previousImageWidth = lastRenderedImageWidth
         lastRenderedImageWidth = image?.size.width
         applyMenuBarImage(image, to: button)
-        button.imagePosition = .imageOnly
-        button.toolTip = MenuBarImage.tooltip(snapshot: snapshot)
+        if button.imagePosition != .imageOnly { button.imagePosition = .imageOnly }
+        if tooltipSnapshotTimestamp != snapshot.timestamp {
+            button.toolTip = MenuBarImage.tooltip(snapshot: snapshot)
+            tooltipSnapshotTimestamp = snapshot.timestamp
+        }
 
         // ⚠️ 档位判定已经在函数**开头**跑过了（原因见那里的长注释：放在渲染之后会白等一拍，
         // 动效关着时那一拍 = 一整个刷新周期）。这里**不要**再调用一次 `adaptToAvailableSpace()`。
@@ -850,6 +850,55 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         syncPanelAnchor()
     }
 
+    /// 文字层缓存的身份：同一份采样、同一档位、同一外观、同一组显示开关，画出来的字完全相同。
+    private struct TextImageKey: Equatable {
+        let timestamp: Date
+        let density: MenuBarDensity
+        let effect: MenuBarEffect
+        let appearance: String?
+        let showNetwork: Bool
+        let showCPU: Bool
+        let showMemory: Bool
+        let showGPU: Bool
+    }
+
+    /// 文字层（不含背景）。它只取决于采样、档位、外观与显示开关，两次数据刷新之间
+    /// 动效定时器每一拍拿到的都是同一份采样，所以直接复用上一张 `NSImage`。
+    /// 每拍重画它会让 AppKit 重新光栅化文字、再排一次状态栏布局，而画出来的像素没有任何变化。
+    ///
+    /// 炫彩的字形随相位变化，依旧每拍重画，不缓存。
+    private func textImage(for snapshot: MetricsSnapshot, density: MenuBarDensity, appearance: NSAppearance?) -> NSImage? {
+        let effect = preferences.menuBarEffect
+        let render = {
+            MenuBarImage.render(
+                snapshot: snapshot,
+                preferences: self.preferences,
+                appearance: appearance,
+                density: density,
+                effect: effect,
+                effectElapsed: effect != .off ? self.effectElapsed : nil,
+                includesBackground: false
+            )
+        }
+        guard effect != .iridescent else { return render() }
+
+        let key = TextImageKey(
+            timestamp: snapshot.timestamp,
+            density: density,
+            effect: effect,
+            appearance: appearance?.name.rawValue,
+            showNetwork: preferences.showNetwork,
+            showCPU: preferences.showCPU,
+            showMemory: preferences.showMemory,
+            showGPU: preferences.showGPU
+        )
+        if key == cachedTextImageKey, let cachedTextImage { return cachedTextImage }
+        let image = render()
+        cachedTextImageKey = key
+        cachedTextImage = image
+        return image
+    }
+
     /// 保留系统按钮的图片尺寸与点击，非关闭光效共用内部的悬浮内容层。
     private func applyMenuBarImage(_ image: NSImage?, to button: NSStatusBarButton) {
         guard preferences.menuBarEffect != .off, let image, !image.isTemplate else {
@@ -857,7 +906,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             statusGlassView?.removeFromSuperview()
             statusGlassView = nil
             glassSizingImage = nil
-            button.image = image
+            if button.image !== image { button.image = image }
             return
         }
         if glassSizingImage?.size != image.size {
@@ -865,7 +914,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             sizingImage.isTemplate = false
             glassSizingImage = sizingImage
         }
-        button.image = glassSizingImage
+        if button.image !== glassSizingImage { button.image = glassSizingImage }
         let usesGlass = preferences.menuBarEffect == .iridescent
         let glass: StatusItemGlassView
         if let existing = statusGlassView, existing.usesGlass == usesGlass {
@@ -1234,8 +1283,9 @@ private final class StatusItemGlassView: NSView {
             imageSize = image.size
             needsLayout = true
         }
-        imageView.image = image
-        backgroundImageView.image = background
+        // 文字层在两次数据刷新之间是同一张图，重复赋值会让 NSImageView 整个重绘一遍
+        if imageView.image !== image { imageView.image = image }
+        if backgroundImageView.image !== background { backgroundImageView.image = background }
     }
 
     func setHoverEnabled(_ enabled: Bool) {

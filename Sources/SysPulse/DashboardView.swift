@@ -18,6 +18,11 @@ struct DashboardView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @PanelState private var page: DashboardPage
     @PanelState private var selectedDetail: DashboardDetail?
+    @PanelState private var isBackHovered = false
+
+    /// 返回箭头悬停位移：只改绘制位置，不改占位尺寸，标题行与整页高度不受影响。
+    private var backArrowShift: CGFloat { isBackHovered && !reduceMotion ? -1.6 : 0 }
+    private var backArrowScale: CGFloat { isBackHovered && !reduceMotion ? 1.08 : 1 }
 
     init(monitor: SystemMonitor, preferences: Preferences,
          initialPage: DashboardPage = .overview, initialDetail: DashboardDetail? = nil,
@@ -136,10 +141,13 @@ struct DashboardView: View {
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Button { page = .settings } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 13, weight: .regular))
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
+                PanelHoverPlate(plate: palette.tile) { hovered in
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .regular))
+                        .rotationEffect(.degrees(hovered && !reduceMotion ? 45 : 0))
+                        .animation(reduceMotion ? nil : .smooth(duration: 0.42, extraBounce: 0), value: hovered)
+                        .frame(width: 30, height: 30)
+                }
             }
             .buttonStyle(PanelPressButtonStyle())
             .foregroundStyle(palette.secondary)
@@ -411,11 +419,17 @@ struct DashboardView: View {
             .accessibilityLabel("调整刷新频率和排版")
             Spacer(minLength: 8)
             Button { NSApp.terminate(nil) } label: {
-                Label("退出", systemImage: "power")
-                    .font(.system(size: 11))
+                PanelHoverPlate(plate: palette.warning.opacity(0.10)) { _ in
+                    Label("退出", systemImage: "power")
+                        .font(.system(size: 11))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 3)
+                }
             }
             .buttonStyle(PanelPressButtonStyle())
             .foregroundStyle(palette.warning)
+            .padding(.horizontal, -5)
+            .padding(.vertical, -3)
         }
     }
 
@@ -423,13 +437,18 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 7) {
                 Button { page = .overview } label: {
+                    // 悬停时箭头向左轻移并略微放大，尺寸与占位保持不变，标题行不会跟着动。
                     Image(systemName: "chevron.left")
                         .font(.system(size: 12, weight: .medium))
+                        .offset(x: backArrowShift)
+                        .scaleEffect(backArrowScale)
+                        .animation(reduceMotion ? nil : .smooth(duration: 0.22, extraBounce: 0), value: isBackHovered)
                         .frame(width: 23, height: 24)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(PanelPressButtonStyle())
                 .foregroundStyle(palette.secondary)
+                .onHover { isBackHovered = $0 }
                 .accessibilityLabel("返回指标面板")
                 .accessibilityIdentifier("panel.back")
                 Text("显示与外观").font(.system(size: 14, weight: .semibold))
@@ -453,13 +472,13 @@ struct DashboardView: View {
                     Text("\(Int((transparency * 100).rounded()))%")
                         .monospacedDigit()
                         .foregroundStyle(palette.primary)
+                        .contentTransition(.numericText(value: transparency))
+                        .animation(reduceMotion ? nil : .smooth(duration: 0.2, extraBounce: 0), value: transparency)
                 }
                 .font(.system(size: 11))
                 .foregroundStyle(palette.secondary)
-                Slider(value: $preferences.panelTransparency, in: 0...1, step: 0.01)
-                    .accessibilityLabel("玻璃通透")
-                    .accessibilityValue("\(Int((transparency * 100).rounded()))%")
-                    .accessibilityIdentifier("panel.transparency")
+                PanelGlassSlider(value: $preferences.panelTransparency, palette: palette,
+                                 valueText: "\(Int((transparency * 100).rounded()))%")
                     .disabled(reduceTransparency)
                 HStack {
                     Text("厚磨砂")
@@ -475,8 +494,8 @@ struct DashboardView: View {
             separator
             VStack(alignment: .leading, spacing: 7) {
                 Toggle("开机启动", isOn: Binding(get: { login.isEnabled }, set: { login.set($0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
+                    .toggleStyle(PanelSwitchToggleStyle(tint: palette.accent,
+                                                        idle: palette.secondary.opacity(0.24)))
                     .font(.system(size: 11))
                     .accessibilityIdentifier("panel.login")
                 if let message = login.errorMessage {
@@ -692,6 +711,225 @@ private struct PanelPressButtonStyle: ButtonStyle {
             .animation(reduceMotion ? .easeOut(duration: 0.08) :
                 .smooth(duration: configuration.isPressed ? 0.08 : 0.18, extraBounce: 0),
                 value: configuration.isPressed)
+    }
+}
+
+/// 文字与图标按钮的悬停底板：淡入淡出即可，布局由调用处的内边距抵消，位置不变。
+private struct PanelHoverPlate<Content: View>: View {
+    let plate: Color
+    var cornerRadius: CGFloat = 8
+    @ViewBuilder let content: (Bool) -> Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @PanelState private var isHovered = false
+
+    var body: some View {
+        content(isHovered)
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(plate)
+                    .opacity(isHovered ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+            .onHover { isHovered = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: isHovered ? 0.16 : 0.24), value: isHovered)
+    }
+}
+
+/// 玻璃通透滑块：自绘轨道与玻璃滑钮，拖动即时跟手，外部重置时平滑滑动。
+/// 无障碍由原生 Slider 提供，角色、数值与调节动作与改动前一致。
+private struct PanelGlassSlider: View {
+    @Binding var value: Double
+    let palette: PanelPalette
+    let valueText: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+    @PanelState private var isHovered = false
+    @PanelState private var isDragging = false
+    @FocusState private var isFocused: Bool
+
+    /// 胶囊玻璃滑钮：比高度更宽，圆润通透，语言与开机启动的开关旋钮一致。
+    private let knobWidth: CGFloat = 27
+    /// 滑钮高度等于行高预算，加高会把设置页顶高。
+    private let knobHeight: CGFloat = 16
+    private let trackHeight: CGFloat = 4
+    private let step = 0.01
+
+    /// 轨道在触及与拖动时的轻微变化：略增厚、底色更深、填充更实、刻度点更清楚。
+    /// 只改绘制尺寸，行高由 knobHeight 固定，设置页高度不受影响。
+    private var trackActive: Bool { isDragging || isHovered }
+    private var trackScale: CGFloat {
+        guard !reduceMotion else { return 1 }
+        return isDragging ? 1.45 : isHovered ? 1.25 : 1
+    }
+    private var trackIdleOpacity: Double {
+        guard !reduceMotion else { return 0.18 }
+        return isDragging ? 0.26 : isHovered ? 0.22 : 0.18
+    }
+    private var trackFillOpacity: Double {
+        guard !reduceMotion else { return 1 }
+        return trackActive ? 1 : 0.97
+    }
+    private var trackTicksOpacity: Double {
+        guard !reduceMotion else { return 0.30 }
+        return isDragging ? 0.42 : isHovered ? 0.36 : 0.30
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let travel = max(1, geometry.size.width - knobWidth)
+            let fraction = min(max(value, 0), 1)
+            ZStack(alignment: .leading) {
+                PanelSliderTicks(inset: knobWidth / 2 - 1)
+                    .stroke(palette.secondary.opacity(trackTicksOpacity),
+                            style: StrokeStyle(lineWidth: 1.1, lineCap: .round, dash: [0, 2.06]))
+                Capsule()
+                    .fill(palette.secondary.opacity(trackIdleOpacity))
+                    .frame(height: trackHeight * trackScale)
+                Capsule()
+                    .fill(palette.accent.opacity(trackFillOpacity))
+                    .frame(width: knobWidth / 2 + travel * fraction, height: trackHeight * trackScale)
+                knob
+                    .offset(x: travel * fraction)
+            }
+            .frame(maxHeight: .infinity)
+            .animation(isDragging || reduceMotion ? nil : .smooth(duration: 0.23, extraBounce: 0), value: fraction)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.20, extraBounce: 0), value: isHovered)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.16, extraBounce: 0), value: isDragging)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { drag in
+                    isDragging = true
+                    setValue((drag.location.x - knobWidth / 2) / travel)
+                }
+                .onEnded { _ in isDragging = false })
+        }
+        .frame(height: knobHeight)
+        .onHover { isHovered = $0 }
+        .opacity(isEnabled ? 1 : 0.45)
+        .allowsHitTesting(isEnabled)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($isFocused)
+        .onKeyPress(.leftArrow) { nudge(-step) }
+        .onKeyPress(.downArrow) { nudge(-step) }
+        .onKeyPress(.rightArrow) { nudge(step) }
+        .onKeyPress(.upArrow) { nudge(step) }
+        .accessibilityRepresentation {
+            Slider(value: $value, in: 0...1, step: step)
+                .accessibilityLabel("玻璃通透")
+                .accessibilityValue(valueText)
+                .accessibilityIdentifier("panel.transparency")
+        }
+    }
+
+    /// 胶囊玻璃滑钮：按下或悬停时放大，聚焦时描边加深。
+    /// 玻璃感来自四层叠加——本体渐变、顶部聚光、底部内阴影（玻璃厚度）、外接地阴影；
+    /// 全部由 `scale` 统一驱动，放大时不会有一层脱节。
+    private var knob: some View {
+        let scale: Double = isDragging ? 1.14 : isHovered ? 1.08 : 1
+        let shape = Capsule(style: .continuous)
+        return shape
+            .fill(LinearGradient(
+                colors: [.white, .white, palette.softWhite.opacity(0.92)],
+                startPoint: .top, endPoint: .bottom))
+            .overlay {
+                // 底部内阴影：模拟玻璃的厚度与折射沉降。
+                shape
+                    .stroke(LinearGradient(colors: [.white.opacity(0), .black.opacity(0.10)],
+                                           startPoint: .center, endPoint: .bottom),
+                            lineWidth: 1.4)
+                    .padding(0.7)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                // 外沿高光：顶部亮、底部透出强调色，形成玻璃边缘的折射线。
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: isFocused
+                            ? [palette.accent.opacity(0.85), palette.accent.opacity(0.55)]
+                            : [.white.opacity(1.0), palette.accent.opacity(0.28)],
+                        startPoint: .top, endPoint: .bottom),
+                    lineWidth: isFocused ? 1.5 : 0.8)
+            }
+            .overlay {
+                // 顶部弧形高光：让胶囊看起来被上方光打亮。
+                Capsule(style: .continuous)
+                    .fill(LinearGradient(colors: [.white.opacity(0.95), .white.opacity(0)],
+                                         startPoint: .top, endPoint: .center))
+                    .padding(1.4)
+                    .allowsHitTesting(false)
+            }
+            .shadow(color: .black.opacity(scale > 1 ? 0.24 : 0.15), radius: scale > 1 ? 4 : 2, y: 1)
+            .shadow(color: .white.opacity(0.5), radius: 0.5, y: -0.5)
+            .frame(width: knobWidth, height: knobHeight)
+            .scaleEffect(scale)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: scale)
+    }
+
+    private func setValue(_ proposed: Double) {
+        let rounded = (min(max(proposed, 0), 1) * 100).rounded() / 100
+        if value != rounded { value = rounded }
+    }
+
+    private func nudge(_ delta: Double) -> KeyPress.Result {
+        setValue(value + delta)
+        return .handled
+    }
+}
+
+/// 滑块下方的刻度点：与原生滑块的刻度位置一致，只描边一条路径，不增加视图层级。
+private struct PanelSliderTicks: Shape {
+    let inset: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let y = rect.maxY - 1.5
+        path.move(to: CGPoint(x: rect.minX + inset, y: y))
+        path.addLine(to: CGPoint(x: rect.maxX - inset, y: y))
+        return path
+    }
+}
+
+/// 开机启动开关：保留 Toggle 的标签与无障碍语义，外观换成面板内的滑动开关。
+private struct PanelSwitchToggleStyle: ToggleStyle {
+    let tint: Color
+    let idle: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        PanelSwitch(configuration: configuration, tint: tint, idle: idle)
+    }
+}
+
+private struct PanelSwitch: View {
+    let configuration: ToggleStyleConfiguration
+    let tint: Color
+    let idle: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @PanelState private var isHovered = false
+
+    var body: some View {
+        Button { configuration.isOn.toggle() } label: {
+            HStack(spacing: 9) {
+                configuration.label
+                ZStack {
+                    Capsule()
+                        .fill(configuration.isOn ? tint : idle)
+                    Circle()
+                        .fill(.white)
+                        .shadow(color: .black.opacity(isHovered ? 0.22 : 0.16), radius: isHovered ? 2 : 1.2, y: 0.8)
+                        .frame(width: 16, height: 16)
+                        .scaleEffect(isHovered && !reduceMotion ? 1.10 : 1)
+                        .offset(x: configuration.isOn ? 12 : -12)
+                }
+                .frame(width: 44, height: 20)
+                .animation(reduceMotion ? nil : .smooth(duration: 0.22, extraBounce: 0), value: configuration.isOn)
+                .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: isHovered)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PanelPressButtonStyle())
+        .accessibilityAddTraits(.isToggle)
+        .onHover { isHovered = $0 }
     }
 }
 

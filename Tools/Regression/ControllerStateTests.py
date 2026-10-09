@@ -34,6 +34,8 @@ controller = (REPO / 'Sources/SysPulse/StatusItemController.swift').read_text()
 methods = [block(controller, signature) for signature in [
     '    static func gpuWidthState(',
     '    private func updateStatusItem(',
+    '    private struct TextImageKey',
+    '    private func textImage(',
     '    private func applyMenuBarImage(',
     '    private func primeDensityWidths(',
     '    private var ceilingIndex:',

@@ -352,7 +352,7 @@ enum MenuBarImage {
     /// 实现成本：每个光斑**一次** `NSGradient.draw`（径向），2~5 个光斑 = 2~5 次填充，
     /// 与 `drawGlow` 的 1 次横向渐变 + `drawRipple` 的 1 次同量级。
     /// 注意整条动效的真实开销不在绘制（实测 0.15ms/帧），而在"每帧换一张状态栏图片"
-    /// 那笔系统开销 —— 见 `contentKey` 的注释。
+    /// 那笔系统开销 —— 文字层已改为复用缓存，见 `StatusItemController.textImage(for:density:appearance:)`。
     static func drawDiffuse(size: NSSize, elapsed: Double) {
         let rect = NSRect(origin: .zero, size: size)
         // 裁到圆角胶囊里：光斑半径比条高，中心也会游走出条外，

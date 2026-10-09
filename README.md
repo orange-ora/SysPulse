@@ -4,18 +4,18 @@
 
 原生 Swift + SwiftUI，无第三方依赖、无网络请求、不收集数据。常驻菜单栏，不占程序坞。
 
-**v1.2.0（2026-10-08）**：全部卡片和菜单栏长条统一反光悬浮，取消立体阴影与悬停放大；面板轻量回收并带菜单栏接收回弹，修正设置页自然高度，机器信息新增点击充能彩蛋。详见 [更新记录](<CHANGELOG.md>) 与 [完整更新报告](<docs/UPDATE-v1.2.0.md>)。
+**v1.3.0（2026-10-09）**：齿轮旋转、退出与返回箭头悬停反馈、玻璃通透滑块重做为胶囊玻璃并带跟手轨道动画，开机启动换成滑动开关；状态栏文字层在两次采样之间复用，减少光效期间的重复绘制。详见 [更新记录](<CHANGELOG.md>) 与 [完整更新报告](<docs/UPDATE-v1.3.0.md>)。
 
 <p align="center">
-  <img src="docs/panel-v1.2.0.png" width="360" alt="新版指标面板：CPU、GPU、内存、网络双列卡片，设备信息、绿色显示开关和连续光效选择栏">
-  <img src="docs/settings-v1.2.0.png" width="360" alt="显示与外观设置：刷新频率、菜单栏排版、71% 玻璃通透度、开机启动和恢复显示默认值">
+  <img src="docs/panel-v1.3.0.png" width="360" alt="新版指标面板：CPU、GPU、内存、网络双列卡片，设备信息、绿色显示开关和连续光效选择栏">
+  <img src="docs/settings-v1.3.0.png" width="360" alt="显示与外观设置：刷新频率、菜单栏排版、71% 玻璃通透滑块、开机启动滑动开关和恢复显示默认值">
 </p>
 
-主面板与设置页使用 v1.2.0 的真实原生界面截图；内存压力详情示例沿用 v1.1.1。读数、设备信息和玻璃透出的背景随机器与时间变化。
+主面板与设置页使用 v1.3.0 的真实原生界面截图；内存压力详情示例沿用 v1.1.1。读数、设备信息和玻璃透出的背景随机器与时间变化。
 
 ## 下载与安装
 
-**[下载 SysPulse-1.2.0.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.2.0/SysPulse-1.2.0.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.2.0/SysPulse-1.2.0.dmg.sha256)
+**[下载 SysPulse-1.3.0.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.3.0/SysPulse-1.3.0.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.3.0/SysPulse-1.3.0.dmg.sha256)
 
 支持 **macOS 14.0+、Apple Silicon 和 Intel**，安装包包含 `arm64` 与 `x86_64` 两种架构，正常运行不需要 Rosetta。
 
@@ -147,6 +147,8 @@ bash Tools/Regression/run.sh
 python3 Tools/Regression/BuildPackagingTests.py
 bash Tools/PanelProbe/run.sh   # 隔离偏好和登录项的原生界面验证
 ```
+
+v1.3.0 最终验证通过 **222 项生产断言、24 个控制器场景、52 项玻璃生命周期与反光断言、1 组文字层缓存一致性断言、39 项开合 / 反向 / 代次断言、64 项受控打包检查**。保留 10 种原生面板状态与设置交互，并新增真实指针悬停断言：**153 项原生断言、16 个几何状态**，每个悬停控件都与同页无关区域做对照。双架构发布参数编译与真实指标自检通过；文字层缓存受控对比每帧 0.021 ms → 0.002 ms。具体方法、截图及输入派发限制见 [v1.3.0 更新报告](<docs/UPDATE-v1.3.0.md>)。
 
 v1.2.0 最终验证通过 **222 项生产断言、24 个控制器场景、52 项玻璃生命周期与反光断言、39 项开合 / 反向 / 代次断言、64 项受控打包检查**。保留 10 种原生面板状态与设置交互，并新增 **137 项原生断言与 16 个几何状态**，覆盖真实切页、详情、彩蛋恢复与取消、实际控制器开合 / 收束 / 接收和减少动态效果分支。双架构发布参数编译与真实指标自检通过；具体方法、截图及输入派发限制见 [v1.2.0 更新报告](<docs/UPDATE-v1.2.0.md>)。
 

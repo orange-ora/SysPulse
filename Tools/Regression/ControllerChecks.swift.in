@@ -304,6 +304,33 @@
         glassController.applyMenuBarImage(nil, to: glassButton)
         verifyGlass(glassButton.image == nil && glassController.glassSizingImage == nil,
                     "nil images leave no stale image or sizing cache")
+        // 文字层缓存：同一份采样复用同一张图；像素与不缓存时的重绘一致；新采样才重画；炫彩每次重画
+        let cacheController = StatusItemController()
+        let cacheButton = cacheController.statusItem.button!
+        cacheController.preferences.menuBarEffect = .diffuse
+        let cacheSample = sampled(ready)
+        cacheController.updateStatusItem(with: cacheSample, allowLayoutChange: false)
+        let firstText = cacheController.cachedTextImage
+        cacheController.updateStatusItem(with: cacheSample, allowLayoutChange: false)
+        precondition(firstText != nil && cacheController.cachedTextImage === firstText,
+                     "same sample reuses the cached text image")
+        let cacheDensity = cacheController.densityOrder[cacheController.currentDensityIndex]
+        let freshText = MenuBarImage.render(snapshot: cacheSample, preferences: cacheController.preferences,
+                                            appearance: cacheButton.effectiveAppearance, density: cacheDensity,
+                                            effect: .diffuse, effectElapsed: cacheController.effectElapsed,
+                                            includesBackground: false)
+        precondition(firstText?.tiffRepresentation == freshText?.tiffRepresentation,
+                     "cached text is byte-identical to a fresh render")
+        precondition(cacheButton.toolTip == MenuBarImage.tooltip(snapshot: cacheSample),
+                     "tooltip matches the current sample")
+        cacheController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
+        precondition(cacheController.cachedTextImage !== firstText,
+                     "a new sample redraws the text image")
+        cacheController.preferences.menuBarEffect = .iridescent
+        let glyphA = cacheController.textImage(for: cacheSample, density: cacheDensity, appearance: nil)
+        let glyphB = cacheController.textImage(for: cacheSample, density: cacheDensity, appearance: nil)
+        precondition(glyphA !== glyphB, "iridescent glyphs keep redrawing every frame")
+        print("PASS: text image cache reuses per sample, matches fresh render bytes, and redraws on new samples")
         print("PASS: \(glassAssertions) native-glass lifecycle/frame assertions with real extracted view and apply function")
         print("PASS: exact update/prime/adapt functions, real renderer, fake coordinates; no real GUI")
     }

@@ -59,6 +59,30 @@ private func nativeTrackingEvent(_ view: NSView, _ point: NSPoint) {
     view.mouseMoved(with: event)
 }
 
+/// 真实指针悬停前后比较同一控件的局部像素；只断言渲染结果变化，不断言动效的具体数值。
+/// 坐标为宿主视图坐标（翻转，y 从顶部算起），与 press 的坐标体系一致。
+///
+/// `quiet` 是同一页面上一块不受该控件影响的区域：它必须**完全不变**。
+/// 没有这条对照，`diff > 0` 可能只是整页重绘、光标闪烁或别的控件在动。
+@MainActor
+private func verifyHover(_ tag: String, _ name: String, at point: NSPoint, region: NSRect,
+                         quiet: NSRect, host: NSView) async {
+    hover(host, NSPoint(x: -20, y: 390))
+    await settle()
+    let neutral = bodyBitmap(host, name: tag + "-" + name + "-neutral")
+    hover(host, point)
+    await settle(0.5)
+    save(host, name: tag + "-" + name + "-hover-native")
+    let hovered = bodyBitmap(host, name: tag + "-" + name + "-hover")
+    let diff = difference(neutral, hovered, rect: region, size: host.bounds.size)
+    let quietDiff = difference(neutral, hovered, rect: quiet, size: host.bounds.size)
+    print("PIXELS \(tag) \(name): hover=\(diff) quiet=\(quietDiff)")
+    check(diff > 0.0001, tag + " " + name + " actual pointer hover produces a visible change")
+    check(quietDiff == 0, tag + " " + name + " hover leaves the page's unrelated region untouched")
+    hover(host, NSPoint(x: -20, y: 390))
+    await settle()
+}
+
 @MainActor
 private func allViews(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(allViews) }
 
@@ -302,6 +326,12 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
             let overview = panel.naturalContentSize.height
             state(tag + "-overview", panel: panel, host: host)
             save(host, name: tag + "-overview-native")
+            await verifyHover(tag, "gear", at: NSPoint(x: 330, y: 34),
+                              region: NSRect(x: 306, y: 12, width: 48, height: 46),
+                              quiet: NSRect(x: 30, y: 160, width: 60, height: 34), host: host)
+            await verifyHover(tag, "quit", at: NSPoint(x: 324, y: 550),
+                              region: NSRect(x: 296, y: 532, width: 56, height: 36),
+                              quiet: NSRect(x: 30, y: 160, width: 60, height: 34), host: host)
             let viewAX = accessibilityElements(host.window as Any).map { element in
                 ["identifier": accessibilityAttribute(element, "accessibilityIdentifier") as? String ?? "",
                  "label": accessibilityAttribute(element, "accessibilityLabel") as? String ?? "",
@@ -316,6 +346,12 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
             check(settingsHeight < overview - 100, tag + " actual gear click switches to shorter settings")
             state(tag + "-settings", panel: panel, host: host)
             save(host, name: tag + "-settings-native")
+            await verifyHover(tag, "slider", at: NSPoint(x: 200, y: 224),
+                              region: NSRect(x: 10, y: 208, width: 340, height: 32),
+                              quiet: NSRect(x: 30, y: 260, width: 60, height: 30), host: host)
+            await verifyHover(tag, "login", at: NSPoint(x: 88, y: 313),
+                              region: NSRect(x: 60, y: 296, width: 56, height: 34),
+                              quiet: NSRect(x: 30, y: 260, width: 60, height: 30), host: host)
             for (x, interval) in [(57.0, 0.5), (139.0, 1.0), (222.0, 2.0), (304.0, 5.0)] {
                 click(host, NSPoint(x: x, y: 91))
                 await settle(0.10)
