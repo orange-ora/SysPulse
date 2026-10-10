@@ -913,9 +913,18 @@ func runFocusedDetailChecks(completion: @escaping () -> Void) {
             }
             if CommandLine.arguments.contains("--chrome-hover-only") {
                 await verifyChromeHover(tag, reduced: reduced, panel: panel, host: host)
+                await verifyHover(tag, "gear", at: NSPoint(x: 330, y: 34),
+                                  region: NSRect(x: 306, y: 12, width: 48, height: 46),
+                                  quiet: NSRect(x: 30, y: 160, width: 60, height: 34), host: host)
+                await verifyHover(tag, "quit", at: NSPoint(x: 324, y: 550),
+                                  region: NSRect(x: 296, y: 532, width: 56, height: 36),
+                                  quiet: NSRect(x: 30, y: 160, width: 60, height: 34), host: host)
                 click(host, NSPoint(x: 333, y: 26))
                 await settle()
                 check(panel.naturalContentSize.height < overview - 100, tag + " deflected header keeps gear clickable")
+                await verifyHover(tag, "back", at: NSPoint(x: 26, y: 26),
+                                  region: NSRect(x: 12, y: 12, width: 28, height: 28),
+                                  quiet: NSRect(x: 170, y: 70, width: 60, height: 30), host: host)
                 press("返回指标面板", in: host)
                 await settle()
                 click(host, NSPoint(x: 120, y: 550))

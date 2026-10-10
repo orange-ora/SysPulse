@@ -20,12 +20,7 @@ struct DashboardView: View {
     @PanelState private var selectedDetail: DashboardDetail?
     @PanelState private var displayedDetail: DashboardDetail
     @StateObject private var detailMotion: PanelDetailAnimation
-    @PanelState private var isBackHovered = false
     @PanelState private var nativeCanvasAttached = false
-
-    /// 返回箭头悬停位移：只改绘制位置，不改占位尺寸，标题行与整页高度不受影响。
-    private var backArrowShift: CGFloat { isBackHovered && !reduceMotion ? -1.6 : 0 }
-    private var backArrowScale: CGFloat { isBackHovered && !reduceMotion ? 1.08 : 1 }
 
     init(monitor: SystemMonitor, preferences: Preferences,
          initialPage: DashboardPage = .overview, initialDetail: DashboardDetail? = nil,
@@ -178,7 +173,7 @@ struct DashboardView: View {
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Button { detailMotion.cancel(); page = .settings } label: {
-                PanelHoverPlate(palette: palette, plate: palette.tile) { hovered in
+                PanelHoverPlate(palette: palette, plate: palette.tile, circular: true) { hovered in
                     Image(systemName: "gearshape")
                         .font(.system(size: 13, weight: .regular))
                         .rotationEffect(.degrees(hovered && !reduceMotion ? 45 : 0))
@@ -469,19 +464,18 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 7) {
                 Button { page = .overview } label: {
-                    // 悬停时箭头向左轻移并略微放大，尺寸与占位保持不变，标题行不会跟着动。
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 12, weight: .medium))
-                        .offset(x: backArrowShift)
-                        .scaleEffect(backArrowScale)
-                        .animation(reduceMotion ? nil : .smooth(duration: 0.22, extraBounce: 0), value: isBackHovered)
-                        .frame(width: 23, height: 24)
-                        .modifier(PanelGlassStyle(palette: palette, cornerRadius: 7, isControl: true))
-                        .contentShape(Rectangle())
+                    PanelHoverPlate(palette: palette, plate: palette.tile, circular: true) { hovered in
+                        // 只移动箭头绘制位置，圆框与标题行占位保持不变。
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .medium))
+                            .offset(x: hovered && !reduceMotion ? -1.6 : 0)
+                            .scaleEffect(hovered && !reduceMotion ? 1.08 : 1)
+                            .animation(reduceMotion ? nil : .smooth(duration: 0.22, extraBounce: 0), value: hovered)
+                            .frame(width: 24, height: 24)
+                    }
                 }
                 .buttonStyle(PanelPressButtonStyle())
                 .foregroundStyle(palette.secondary)
-                .onHover { isBackHovered = $0 }
                 .accessibilityLabel("返回指标面板")
                 .accessibilityIdentifier("panel.back")
                 Text("显示与外观").font(.system(size: 14, weight: .semibold))
@@ -988,24 +982,37 @@ private struct PanelPressButtonStyle: ButtonStyle {
     }
 }
 
-/// 文字与图标按钮的悬停底板：淡入淡出即可，布局由调用处的内边距抵消，位置不变。
+/// 小按钮仅在悬停时显露玻璃与细边，前景和命中范围始终保持不变。
 private struct PanelHoverPlate<Content: View>: View {
     let palette: PanelPalette
     let plate: Color
     var cornerRadius: CGFloat = 8
+    var circular = false
     @ViewBuilder let content: (Bool) -> Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @PanelState private var isHovered = false
 
+    private var shape: AnyShape {
+        circular ? AnyShape(Circle()) :
+            AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+
     var body: some View {
         content(isHovered)
-            .modifier(PanelGlassStyle(palette: palette, cornerRadius: cornerRadius, isControl: true))
             .background {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(plate)
-                    .opacity(isHovered ? 1 : 0)
+                GeometryReader { geometry in
+                    // 圆形控件使用等边尺寸；玻璃、反光和轮廓共享同一裁切。
+                    shape.fill(plate)
+                        .modifier(PanelGlassStyle(palette: palette,
+                            cornerRadius: circular ? min(geometry.size.width, geometry.size.height) / 2 : cornerRadius,
+                            isControl: true))
+                        .clipShape(shape)
+                        .opacity(isHovered ? 1 : 0)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
-            .contentShape(Rectangle())
+            .contentShape(shape)
             .onHover { isHovered = $0 }
             .animation(reduceMotion ? nil : .easeOut(duration: isHovered ? 0.16 : 0.24), value: isHovered)
     }

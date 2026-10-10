@@ -4,18 +4,18 @@
 
 原生 Swift + SwiftUI，无第三方依赖、无网络请求、不收集数据。常驻菜单栏，不占程序坞。
 
-**v1.4.0（2026-10-10）**：详情展开与收起更顺滑，修复整页在动画端点的跳动；玻璃卡片悬停更稳定，通透滑条加入鲜亮交织色、细密随机星点与拖动反馈。四项指标配色更鲜明、大数字更纯净，GPU 新增 92% 黄警 / 97% 红警。详见 [更新记录](<CHANGELOG.md>) 与 [完整更新报告](<docs/UPDATE-v1.4.0.md>)。
+**v1.4.1（2026-10-10）**：设置、退出和返回按钮默认无框，鼠标悬停时才显露细腻玻璃轮廓；设置与返回使用圆形框，退出使用圆角框，移开后平滑淡出。详见 [更新记录](<CHANGELOG.md>) 与 [本版更新说明](<docs/UPDATE-v1.4.1.md>)。v1.4.0 的详情动画、星点滑条、鲜亮指标和 GPU 告警继续保留。
 
 <p align="center">
-  <img src="docs/panel-v1.4.0.png" width="360" alt="v1.4.0 指标面板：鲜亮四色卡片、中性近黑大数字、设备信息与稳定的原生玻璃">
-  <img src="docs/settings-v1.4.0.png" width="360" alt="v1.4.0 显示与外观：71% 交织星点玻璃滑条、无色玻璃滑钮与开机启动开关">
+  <img src="docs/panel-v1.4.1.png" width="360" alt="v1.4.1 指标面板：设置按钮悬停时显示圆形玻璃框，退出按钮默认无框">
+  <img src="docs/settings-v1.4.1.png" width="360" alt="v1.4.1 显示与外观：返回按钮悬停时显示圆形玻璃框">
 </p>
 
-主面板、设置页和下方详情示例均为 v1.4.0 的真实原生界面截图，使用隔离偏好与受控背景拍摄。读数、设备信息和玻璃透出的背景随机器与时间变化。
+主面板与设置页展示本轮实际原生截图中的设置、返回悬停状态，使用隔离偏好与受控背景拍摄；下方详情与炫彩示例沿用 v1.4.0 截图。读数、设备信息和玻璃透出的背景随机器与时间变化。
 
 ## 下载与安装
 
-**[下载 SysPulse-1.4.0.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.4.0/SysPulse-1.4.0.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.4.0/SysPulse-1.4.0.dmg.sha256)
+**[下载 SysPulse-1.4.1.dmg](https://github.com/orange-ora/SysPulse/releases/download/v1.4.1/SysPulse-1.4.1.dmg)** · [所有版本](https://github.com/orange-ora/SysPulse/releases) · [SHA-256 校验文件](https://github.com/orange-ora/SysPulse/releases/download/v1.4.1/SysPulse-1.4.1.dmg.sha256)
 
 支持 **macOS 14.0+、Apple Silicon 和 Intel**，安装包包含 `arm64` 与 `x86_64` 两种架构，正常运行不需要 Rosetta。
 
