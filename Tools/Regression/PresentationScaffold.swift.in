@@ -33,6 +33,7 @@ final class PanelContentController: FixtureController {
     var naturalContentSize = NSSize(width: 360, height: 571.5)
     var contraction: CGFloat = 0
     func setContraction(_ contraction: CGFloat) { self.contraction = contraction }
+    func finishDetailAnimation() {}
 }
 final class NSPopover {
     var contentSize = NSSize(width: 386, height: 598)

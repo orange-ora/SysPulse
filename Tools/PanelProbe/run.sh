@@ -13,7 +13,7 @@ swiftc -swift-version 5 -target "$PROBE_TARGET" -warnings-as-errors \
     -emit-module-path "$PROBE_BUILD/ServiceManagement.swiftmodule" \
     -o "$PROBE_BUILD/libServiceManagement.dylib"
 SOURCE_ARGS=()
-for source in Monitors SystemMonitor Preferences LaunchAtLogin Formatting MenuBarImage PanelAnchorAnimation PanelPresentationAnimation DashboardView DeviceInformationCard StatusItemController SingleInstance; do
+for source in Monitors SystemMonitor Preferences LaunchAtLogin Formatting MenuBarImage PanelAnchorAnimation PanelDetailAnimation PanelPresentationAnimation DashboardView DeviceInformationCard StatusItemController SingleInstance; do
     SOURCE_ARGS+=("$PROJECT_ROOT/Sources/SysPulse/$source.swift")
 done
 swiftc -O -swift-version 5 -target "$PROBE_TARGET" -warnings-as-errors \

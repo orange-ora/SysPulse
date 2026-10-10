@@ -643,7 +643,7 @@ enum MenuBarImage {
 
         let cpu = preferences.showCPU ? metric("CPU", snapshot.cpuUsage) : nil
         let gpu = (preferences.showGPU ? snapshot.gpuUsage : nil).map {
-            metric("GPU", $0 / 100, color: .labelColor)
+            metric("GPU", $0 / 100, color: StatusItemController.gpuTint(for: $0 / 100))
         }
         let memory = preferences.showMemory ? metric("MEM", snapshot.memoryFraction,
                                                      color: StatusItemController.memoryTint(for: snapshot.memoryPressure)) : nil

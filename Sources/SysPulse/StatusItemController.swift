@@ -470,7 +470,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             popover.hasFullSizeContent = true
             let measurement = PanelContentMeasurement()
             let view = DashboardView(monitor: monitor, preferences: preferences, usesWindowSurface: true,
-                naturalSizeDidChange: { size in measurement.receive(size) })
+                naturalSizeDidChange: { size in measurement.receive(size) }, detailMotion: measurement.detailAnimation)
                 .background(PanelWindowAttachment { [weak self] window in self?.preparePanelWindow(window) })
             let hosting = NSHostingController(rootView: view)
             hosting.safeAreaRegions = []
@@ -599,6 +599,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // 目标没变就别重启：换档时预测和"x 就位后的精确纠正"会先后提出**同一个**目标，
         // 重启会把 180ms 的缓出重新计时（实测总时长被拉长到 243ms），而且中途速度会顿一下。
         if let running = anchorAnimation, abs(running.target - screenX) <= 0.5 { return }
+        (popover.contentViewController as? PanelContentController)?.finishDetailAnimation()
         anchorAnimation?.cancel()
         anchorAnimation = PanelAnchorAnimation(
             from: current,
@@ -1131,6 +1132,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         case .warning: return .systemOrange
         case .critical: return .systemRed
         }
+    }
+
+    /// GPU 在 92% 开始黄警，97% 开始红警；平时适配系统菜单栏主色。
+    static func gpuTint(for fraction: Double) -> NSColor {
+        fraction >= 0.97 ? .systemRed : fraction >= 0.92 ? .systemYellow : .labelColor
     }
 
     /// CPU 占用越高颜色越警示，平时保持系统主色以适配浅色 / 深色菜单栏。

@@ -99,14 +99,8 @@ struct DeviceInformationCard: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(palette.tile))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(palette.accent.opacity(isCelebrating ? 0.30 : Double(charge) * 0.025),
-                              lineWidth: 0.75)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
+        .modifier(PointerCardHover(borderTint: palette.accent, palette: palette,
+                                   emphasis: isCelebrating ? 0.30 : Double(charge) * 0.025))
         .contentShape(RoundedRectangle(cornerRadius: 10))
     }
 

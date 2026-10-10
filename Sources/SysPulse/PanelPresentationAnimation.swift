@@ -27,6 +27,7 @@ final class PanelPresentationAnimation {
     private var accessibilityObserver: NSObjectProtocol?
 
     init?(popover: NSPopover, window: NSWindow, visibleAlpha: CGFloat? = nil, menuAnchor: NSRect? = nil) {
+        (popover.contentViewController as? PanelContentController)?.finishDetailAnimation()
         let size = popover.contentSize
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return nil }
         self.window = window
@@ -167,6 +168,7 @@ final class PanelPresentationAnimation {
 
 /// 各次创建独立缓存首个正文测量；容器绑定后只向自己的容器传递。
 final class PanelContentMeasurement {
+    let detailAnimation = PanelDetailAnimation()
     private weak var target: PanelContentController?
     private var latest: NSSize?
 
@@ -179,6 +181,7 @@ final class PanelContentMeasurement {
 
     func attach(_ target: PanelContentController) {
         self.target = target
+        detailAnimation.attach(target)
         if let latest { target.acceptMeasuredContentSize(latest) }
     }
 }
@@ -194,6 +197,59 @@ final class PanelContentController: NSViewController {
     private var hasMeasuredContentSize = false
     private var pendingMeasuredSize: NSSize?
     private var measurementUpdateScheduled = false
+    private weak var detailAnimation: PanelDetailAnimation?
+
+    var isDetailAnimating: Bool { detailAnimation?.isAnimating == true }
+    var isPresentationSizingSuspended: Bool { sizeUpdatesSuspended }
+    var detailDocumentSize: NSSize { naturalContentSize }
+
+    func bindDetailAnimation(_ animation: PanelDetailAnimation) { detailAnimation = animation }
+
+    func finishDetailAnimation() { detailAnimation?.cancel() }
+
+    func stageDetailSize(_ size: NSSize) {
+        guard Self.valid(size) else { return }
+        let window = viewport.window
+        let visibleFrame = window?.frame
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            naturalContentSize = size
+            viewport.updateDocumentSize(size)
+            // AppKit 原子提交尺寸准备和位置恢复，临时弹窗重定位不会单独显示。
+            prepareFullSizeLayout()
+            if let window, let visibleFrame { window.setFrame(visibleFrame, display: false) }
+            viewport.updateDocumentSize(size)
+            CATransaction.commit()
+        }
+    }
+
+    func commitDetailSize(_ size: NSSize) {
+        guard Self.valid(size) else { return }
+        pendingMeasuredSize = nil
+        pendingSize = nil
+        naturalContentSize = size
+        viewport.updateDocumentSize(size)
+        // 保留当前窗口上沿；NSPopover 对半点正文尺寸会做自己的取整。
+        let window = viewport.window
+        let restingTop = window?.frame.maxY
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            prepareFullSizeLayout()
+            if let window, let restingTop {
+                var frame = window.frame
+                frame.origin.y = restingTop - frame.height
+                window.setFrame(frame, display: false)
+            }
+            viewport.updateDocumentSize(size)
+            CATransaction.commit()
+        }
+    }
 
     init?<Content: View>(hosting: NSHostingController<Content>, preferences: Preferences) {
         self.hosting = hosting
@@ -238,7 +294,7 @@ final class PanelContentController: NSViewController {
             self.pendingMeasuredSize = nil
             if self.sizeUpdatesSuspended {
                 self.pendingSize = size
-            } else {
+            } else if self.detailAnimation?.receiveMeasuredSize(size) != true {
                 self.updateNaturalSize(size)
             }
         }
@@ -259,10 +315,11 @@ final class PanelContentController: NSViewController {
 
     func restoreSizeUpdates() {
         sizeUpdatesSuspended = false
+        detailAnimation?.resumeAfterPresentation()
         let size = pendingMeasuredSize ?? pendingSize ?? (hasMeasuredContentSize ? naturalContentSize : hosting.preferredContentSize)
         pendingMeasuredSize = nil
         pendingSize = nil
-        if Self.valid(size) { updateNaturalSize(size) }
+        if Self.valid(size), detailAnimation?.receiveMeasuredSize(size) != true { updateNaturalSize(size) }
     }
 
     @discardableResult

@@ -42,6 +42,7 @@ methods = [block(controller, signature) for signature in [
     '    private var currentDensityIndex:',
     '    private func adaptToAvailableSpace(',
     '    static func memoryTint(',
+    '    static func gpuTint(',
     '    static func tint(',
 ]]
 monitors = (REPO / 'Sources/SysPulse/Monitors.swift').read_text()

@@ -16,7 +16,7 @@ swiftc -swift-version 5 -target "$TEST_TARGET" -warnings-as-errors -module-cache
 SOURCE_FILES=(
     Monitors.swift SystemMonitor.swift Preferences.swift LaunchAtLogin.swift
     Formatting.swift MenuBarImage.swift PanelAnchorAnimation.swift
-    DashboardView.swift DeviceInformationCard.swift PanelPresentationAnimation.swift
+    DashboardView.swift DeviceInformationCard.swift PanelDetailAnimation.swift PanelPresentationAnimation.swift
     StatusItemController.swift SingleInstance.swift
 )
 SOURCE_ARGS=()
@@ -32,6 +32,7 @@ swiftc -O -swift-version 5 -target "$TEST_TARGET" -warnings-as-errors -module-ca
     "$PROJECT_ROOT/Tools/Regression/PanelContentChecks.swift" \
     -o "$TEST_BUILD/RegressionTests"
 
-"$TEST_BUILD/RegressionTests"
+"$TEST_BUILD/RegressionTests" "$@"
+if [[ "${1:-}" == "--metric-colors-only" ]]; then exit 0; fi
 python3 "$PROJECT_ROOT/Tools/Regression/ControllerStateTests.py" "$TEST_BUILD/controller"
 python3 "$PROJECT_ROOT/Tools/Regression/PresentationStateTests.py" "$TEST_BUILD/presentation"

@@ -6,7 +6,10 @@ import SwiftUI
 // 与 Tools/Regression 生成的 ServiceManagement mock 一起编译。
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let interactiveMode = CommandLine.arguments.contains("--interactive")
+let releaseScreenshotsMode = CommandLine.arguments.contains("--release-screenshots")
+let interactiveMode = !releaseScreenshotsMode && CommandLine.arguments.contains("--interactive")
+let materialStudyMode = CommandLine.arguments.contains("--material-study")
+let detailOnlyMode = !releaseScreenshotsMode && ["--detail-only", "--detail-mid-only", "--detail-handoff-only", "--detail-jump-only", "--chrome-hover-only", "--slider-only"].contains { CommandLine.arguments.contains($0) }
 let outputArgument = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("--") }
 let output = URL(fileURLWithPath: outputArgument ?? "build/panel-preview")
 if !interactiveMode {
@@ -25,9 +28,23 @@ if interactiveMode, let installed = UserDefaults.standard.persistentDomain(forNa
 }
 let preferences = Preferences(defaults: defaults)
 let monitor = SystemMonitor()
-if !interactiveMode {
+if !interactiveMode && !releaseScreenshotsMode {
     for _ in 0..<12 { monitor.sampleOnce() }
 }
+
+let releaseVersion: String = {
+    guard releaseScreenshotsMode else { return "" }
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+    let info = root.appendingPathComponent("Resources/Info.plist")
+    guard let data = try? Data(contentsOf: info),
+          let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+          let version = (plist as? [String: Any])?["CFBundleShortVersionString"] as? String,
+          !version.isEmpty, version.allSatisfy({ $0.isNumber || $0 == "." }) else {
+        fail("release screenshot version unavailable in Resources/Info.plist")
+    }
+    return version
+}()
 
 struct PreviewState {
     let name: String
@@ -36,7 +53,12 @@ struct PreviewState {
     let detail: DashboardDetail?
     let transparency: Double
 }
-let states = [
+let states = releaseScreenshotsMode ? [
+    PreviewState(name: "panel-v\(releaseVersion)", appearance: .aqua, page: .overview, detail: nil, transparency: 0.71),
+    PreviewState(name: "settings-v\(releaseVersion)", appearance: .aqua, page: .settings, detail: nil, transparency: 0.71),
+    PreviewState(name: "memory-detail-v\(releaseVersion)", appearance: .aqua, page: .overview, detail: .memory, transparency: 0.71),
+    PreviewState(name: "panel-iridescent-v\(releaseVersion)", appearance: .aqua, page: .overview, detail: nil, transparency: 0.71)
+] : [
     PreviewState(name: "dark", appearance: .darkAqua, page: .overview, detail: nil, transparency: 0.30),
     PreviewState(name: "light", appearance: .aqua, page: .overview, detail: nil, transparency: 0.30),
     PreviewState(name: "settings", appearance: .aqua, page: .settings, detail: nil, transparency: 0.30),
@@ -47,13 +69,16 @@ let states = [
     PreviewState(name: "clear", appearance: .aqua, page: .overview, detail: nil, transparency: 1),
     PreviewState(name: "frosted-dark", appearance: .darkAqua, page: .overview, detail: nil, transparency: 0),
     PreviewState(name: "clear-dark", appearance: .darkAqua, page: .overview, detail: nil, transparency: 1)
-]
+] + (materialStudyMode ? [
+    PreviewState(name: "glass-overview", appearance: .aqua, page: .overview, detail: nil, transparency: 0.71),
+    PreviewState(name: "glass-settings", appearance: .aqua, page: .settings, detail: nil, transparency: 0.71)
+] : [])
 final class PanelPreviewWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
 
-let popoverMode = interactiveMode || CommandLine.arguments.contains("--popover")
+let popoverMode = releaseScreenshotsMode || interactiveMode || CommandLine.arguments.contains("--popover")
 let previewPopover = NSPopover()
 previewPopover.behavior = .applicationDefined
 previewPopover.animates = false
@@ -68,6 +93,7 @@ if interactiveMode {
 var currentWindow: NSWindow?
 var reports: [String] = []
 var rendered: [String: NSImage] = [:]
+var releaseSampler: Timer?
 
 func fail(_ message: String) -> Never {
     defaults.removePersistentDomain(forName: suite)
@@ -75,8 +101,14 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-func save(_ hosting: NSView, name: String) {
-    hosting.layoutSubtreeIfNeeded()
+func save(_ hosting: NSView, name: String, layout: Bool = true) {
+    if layout { hosting.layoutSubtreeIfNeeded() }
+    if releaseScreenshotsMode {
+        guard CGPreflightScreenCaptureAccess(), let window = hosting.window,
+              let backdrop = nativeBackdrop, backdrop.frame.contains(window.frame) else {
+            fail("release screenshots require screen capture access and a popover entirely over the controlled backdrop")
+        }
+    }
     if CGPreflightScreenCaptureAccess(), let window = hosting.window {
         let destination = output.appendingPathComponent("\(name).png")
         let capture = Process()
@@ -230,10 +262,31 @@ func render(_ index: Int) {
     }
     currentWindow = nil
     if index == states.count {
+        if releaseScreenshotsMode {
+            releaseSampler?.invalidate()
+            releaseSampler = nil
+            nativeBackdrop?.orderOut(nil)
+            if let previewItem { NSStatusBar.system.removeStatusItem(previewItem) }
+            try? reports.joined(separator: "\n").write(to: output.appendingPathComponent("release-layout.txt"), atomically: true, encoding: .utf8)
+            defaults.removePersistentDomain(forName: suite)
+            print("PASS: captured \(states.count) release screenshots from real NSPopovers with live samples and a controlled backdrop; isolated preferences cleaned up")
+            app.terminate(nil)
+            return
+        }
         makeBoard()
         makeBoard(names: ["frosted", "clear", "settings"],
                   captions: ["厚磨砂 · 0%", "清透玻璃 · 100%", "玻璃通透 · 完整尺度"],
                   heading: "SysPulse · 玻璃材质实际调节效果", filename: "material-board")
+        if materialStudyMode {
+            makeBoard(names: ["frosted", "glass-overview", "glass-settings"],
+                      captions: ["厚磨砂 · 0%", "指标面板 · 71%", "设置控件 · 71%"],
+                      heading: "SysPulse · Liquid Glass 原生材质", filename: "glass-board")
+            try? reports.joined(separator: "\n").write(to: output.appendingPathComponent("layout.txt"), atomically: true, encoding: .utf8)
+            defaults.removePersistentDomain(forName: suite)
+            print("PASS: controlled material study captured with isolated preferences")
+            app.terminate(nil)
+            return
+        }
         runExtendedNativeChecks {
             try? reports.joined(separator: "\n").write(to: output.appendingPathComponent("layout.txt"), atomically: true, encoding: .utf8)
             defaults.removePersistentDomain(forName: suite)
@@ -246,10 +299,15 @@ func render(_ index: Int) {
     let appearance = NSAppearance(named: state.appearance)!
     app.appearance = appearance
     preferences.panelTransparency = state.transparency
+    if releaseScreenshotsMode {
+        preferences.resetDisplaySettings()
+        preferences.panelTransparency = 0.71
+        preferences.menuBarEffect = index == states.count - 1 ? .iridescent : .diffuse
+    }
     let measurement = PanelContentMeasurement()
     let root = DashboardView(monitor: monitor, preferences: preferences, initialPage: state.page,
                              initialDetail: state.detail, usesWindowSurface: popoverMode,
-                             naturalSizeDidChange: { measurement.receive($0) })
+                             naturalSizeDidChange: { measurement.receive($0) }, detailMotion: measurement.detailAnimation)
     let controller = NSHostingController(rootView: AnyView(root))
     controller.sizingOptions = .preferredContentSize
     controller.safeAreaRegions = []
@@ -268,6 +326,10 @@ func render(_ index: Int) {
         previewPopover.contentSize = panel.preferredContentSize
         previewPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         panel.prepareFullSizeLayout()
+        if releaseScreenshotsMode, let window = hosting.window {
+            window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+            window.makeKey()
+        }
     } else {
         let window = PanelPreviewWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = appearance
@@ -279,7 +341,7 @@ func render(_ index: Int) {
         currentWindow = window
         window.makeKeyAndOrderFront(nil)
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + (releaseScreenshotsMode ? 0.6 : 0.25)) {
         if popoverMode {
             guard let window = hosting.window else {
                 fail("popover window missing; shown=\(previewPopover.isShown), anchorWindow=\(previewItem?.button?.window != nil)")
@@ -289,7 +351,7 @@ func render(_ index: Int) {
             currentWindow = window
         }
         save(hosting, name: state.name)
-        if index == 0 {
+        if index == 0 && !releaseScreenshotsMode {
             interactionCheck(hosting) { render(index + 1) }
         } else {
             render(index + 1)
@@ -306,8 +368,10 @@ final class InteractivePreview: NSObject, NSApplicationDelegate {
 
     func start() {
         let measurement = PanelContentMeasurement()
-        let root = DashboardView(monitor: monitor, preferences: preferences, usesWindowSurface: true,
-                                 naturalSizeDidChange: { measurement.receive($0) })
+        let root = DashboardView(monitor: monitor, preferences: preferences,
+                                 initialPage: CommandLine.arguments.contains("--slider-preview") ? .settings : .overview,
+                                 usesWindowSurface: true,
+                                 naturalSizeDidChange: { measurement.receive($0) }, detailMotion: measurement.detailAnimation)
         let controller = NSHostingController(rootView: root)
         controller.sizingOptions = .preferredContentSize
         controller.safeAreaRegions = []
@@ -407,13 +471,31 @@ final class InteractivePreview: NSObject, NSApplicationDelegate {
     }
 }
 
+// 静止的受控背景用于观察透明与折射；不读取或修改用户桌面。
+final class MaterialStudyBackdrop: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSGradient(starting: NSColor(calibratedRed: 0.24, green: 0.40, blue: 0.60, alpha: 1),
+                   ending: NSColor(calibratedRed: 0.86, green: 0.91, blue: 0.95, alpha: 1))?
+            .draw(in: bounds, angle: 25)
+        NSColor.white.withAlphaComponent(0.18).setFill()
+        for index in 0..<12 {
+            let x = bounds.width * CGFloat(index) / 11
+            NSBezierPath(roundedRect: NSRect(x: x, y: bounds.midY - 350,
+                                            width: 76, height: 700), xRadius: 38, yRadius: 38).fill()
+        }
+    }
+}
+
 let nativeBackdrop: NSWindow? = !interactiveMode ? {
     guard let screen = NSScreen.main else { return nil }
     let window = PanelPreviewWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
     window.ignoresMouseEvents = true
     window.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.91, blue: 0.94, alpha: 1)
-    window.level = .normal
+    if materialStudyMode || releaseScreenshotsMode {
+        window.contentView = MaterialStudyBackdrop(frame: screen.frame)
+    }
+    window.level = releaseScreenshotsMode ? .popUpMenu : .normal
     window.orderFrontRegardless()
     return window
 }() : nil
@@ -422,6 +504,21 @@ let interactivePreview = interactiveMode ? InteractivePreview() : nil
 if let interactivePreview {
     app.delegate = interactivePreview
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { interactivePreview.start() }
+} else if releaseScreenshotsMode {
+    preferences.resetDisplaySettings()
+    monitor.sampleOnce()
+    let sampler = Timer(timeInterval: 0.25, repeats: true) { _ in monitor.sampleOnce() }
+    sampler.tolerance = 0.025
+    releaseSampler = sampler
+    RunLoop.main.add(sampler, forMode: .common)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { render(0) }
+} else if detailOnlyMode {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        runFocusedDetailChecks {
+            defaults.removePersistentDomain(forName: suite)
+            app.terminate(nil)
+        }
+    }
 } else {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { render(0) }
 }

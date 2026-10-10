@@ -97,9 +97,9 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         check(monitor.snapshot.memoryPressure == .normal, "memory pressure: valid normal status recovers after failed read")
 
         let palette = PanelPalette(transparency: 0.71)
-        check(palette.memoryColor(.normal) == palette.primary && palette.memoryColor(.unknown) == palette.primary,
+        check(palette.memoryColor(.normal) == palette.readingPrimary && palette.memoryColor(.unknown) == palette.readingPrimary,
               "memory pressure: panel uses neutral text for normal/unknown")
-        check(palette.memoryColor(.warning) == palette.warning && palette.memoryColor(.critical) == palette.critical,
+        check(palette.memoryColor(.warning) == palette.readingWarning && palette.memoryColor(.critical) == palette.readingCritical,
               "memory pressure: panel warning/critical colors follow system state")
         check(StatusItemController.memoryTint(for: .normal) == .labelColor && StatusItemController.memoryTint(for: .unknown) == .labelColor,
               "memory pressure: menu bar uses neutral text for normal/unknown")
@@ -157,20 +157,32 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
 
     static func metricColors() {
         let palette = PanelPalette(transparency: 0.71)
-        for fraction in [0.79, 0.80, 0.92, 1.0] {
-            check(palette.readingColor(.gpu, fraction: fraction, memoryPressure: .critical) == palette.primary,
-                  "GPU panel: \(fraction * 100)% stays neutral independently of memory pressure")
+        for (fraction, panelColor, menuColor) in [
+            (0.0, palette.readingPrimary, NSColor.labelColor),
+            (0.80, palette.readingPrimary, NSColor.labelColor),
+            (0.9199, palette.readingPrimary, NSColor.labelColor),
+            (0.92, palette.readingWarning, NSColor.systemYellow),
+            (0.9699, palette.readingWarning, NSColor.systemYellow),
+            (0.97, palette.readingCritical, NSColor.systemRed),
+            (1.0, palette.readingCritical, NSColor.systemRed)
+        ] {
+            for pressure in [MemoryPressure.normal, .warning, .critical, .unknown] {
+                check(palette.readingColor(.gpu, fraction: fraction, memoryPressure: pressure) == panelColor,
+                      "GPU panel: \(fraction * 100)% uses its own 92/97 thresholds with \(pressure) memory pressure")
+            }
+            check(StatusItemController.gpuTint(for: fraction) == menuColor,
+                  "GPU menu bar: \(fraction * 100)% uses its own 92/97 thresholds")
         }
         check(palette.readingColor(.gpu, fraction: nil, memoryPressure: .normal) == palette.secondary,
               "GPU panel: missing data retains its secondary text color")
-        check(palette.readingColor(.cpu, fraction: 0.80, memoryPressure: .normal) == palette.warning &&
-              palette.readingColor(.cpu, fraction: 0.92, memoryPressure: .normal) == palette.critical,
+        check(palette.readingColor(.cpu, fraction: 0.80, memoryPressure: .normal) == palette.readingWarning &&
+              palette.readingColor(.cpu, fraction: 0.92, memoryPressure: .normal) == palette.readingCritical,
               "CPU panel: warning thresholds remain independent of GPU changes")
-        check(palette.readingColor(.memory, fraction: 0.99, memoryPressure: .normal) == palette.primary &&
-              palette.readingColor(.memory, fraction: 0.99, memoryPressure: .unknown) == palette.primary,
+        check(palette.readingColor(.memory, fraction: 0.99, memoryPressure: .normal) == palette.readingPrimary &&
+              palette.readingColor(.memory, fraction: 0.99, memoryPressure: .unknown) == palette.readingPrimary,
               "memory panel: 99% usage with normal or unknown pressure stays neutral")
-        check(palette.readingColor(.memory, fraction: 0.40, memoryPressure: .warning) == palette.warning &&
-              palette.readingColor(.memory, fraction: 0.40, memoryPressure: .critical) == palette.critical,
+        check(palette.readingColor(.memory, fraction: 0.40, memoryPressure: .warning) == palette.readingWarning &&
+              palette.readingColor(.memory, fraction: 0.40, memoryPressure: .critical) == palette.readingCritical,
               "memory panel: low utilization does not mask system warning or critical pressure")
 
         let suite = "SysPulse.Regression.MetricColors.\(UUID().uuidString)"
@@ -189,8 +201,8 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
             return MenuBarImage.render(snapshot: snapshot, preferences: preferences, appearance: appearance,
                                        density: density, effect: .off)!
         }
-        // Plain text is achromatic; orange/red glyph pixels verify actual renderer output.
-        func coloredPixels(_ image: NSImage) -> Int {
+        // Plain text is achromatic; optional hue checks distinguish yellow from red glyphs.
+        func coloredPixels(_ image: NSImage, yellow: Bool? = nil) -> Int {
             let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
             var count = 0
             for y in 0..<bitmap.pixelsHigh {
@@ -199,7 +211,15 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
                           color.alphaComponent > 0.1 else { continue }
                     let maximum = max(max(color.redComponent, color.greenComponent), color.blueComponent)
                     let minimum = min(min(color.redComponent, color.greenComponent), color.blueComponent)
-                    if maximum - minimum > 0.12 { count += 1 }
+                    guard maximum - minimum > 0.12 else { continue }
+                    if let yellow {
+                        let matches = yellow
+                            ? color.greenComponent > color.redComponent * 0.65 && color.greenComponent > color.blueComponent * 1.5
+                            : color.redComponent > color.greenComponent * 1.5 && color.redComponent > color.blueComponent * 1.5
+                        if matches { count += 1 }
+                    } else {
+                        count += 1
+                    }
                 }
             }
             return count
@@ -208,10 +228,24 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
             let appearance = NSAppearance(named: name)!
             for density in [MenuBarDensity.full, .compact, .minimal] {
                 let gpu80 = render(gpu: true, usage: 0.80, density: density, appearance: appearance)
+                let gpuBelow92 = render(gpu: true, usage: 0.9199, density: density, appearance: appearance)
+                let gpu92 = render(gpu: true, usage: 0.92, density: density, appearance: appearance)
+                let gpuBelow97 = render(gpu: true, usage: 0.9699, density: density, appearance: appearance)
+                let gpu97 = render(gpu: true, usage: 0.97, density: density, appearance: appearance)
                 let gpu100 = render(gpu: true, usage: 1.0, density: density, appearance: appearance)
-                check(coloredPixels(gpu80) == 0, "GPU rendering \(name.rawValue)/\(density): 80% has no warning color")
-                check(coloredPixels(gpu100) == 0, "GPU rendering \(name.rawValue)/\(density): 100% has no warning color")
-                check(gpu80.size == gpu100.size, "GPU rendering \(name.rawValue)/\(density): full utilization preserves width")
+                check(coloredPixels(gpu80) == 0 && coloredPixels(gpuBelow92) == 0,
+                      "GPU rendering \(name.rawValue)/\(density): below 92% stays neutral")
+                let yellowCount = coloredPixels(gpu92, yellow: true)
+                let yellowRedFringe = coloredPixels(gpu92, yellow: false)
+                let redCount = coloredPixels(gpu97, yellow: false)
+                let redYellowFringe = coloredPixels(gpu97, yellow: true)
+                print("GPU-HUE \(name.rawValue)/\(density): yellow=\(yellowCount), red fringe=\(yellowRedFringe); red=\(redCount), yellow fringe=\(redYellowFringe)")
+                check(yellowCount > max(yellowRedFringe * 5, 0) && coloredPixels(gpuBelow97, yellow: true) > 0,
+                      "GPU rendering \(name.rawValue)/\(density): 92% to below 97% shows yellow warning")
+                check(redCount > max(redYellowFringe * 5, 0) && coloredPixels(gpu100, yellow: false) > 0,
+                      "GPU rendering \(name.rawValue)/\(density): 97% and above shows critical warning")
+                check([gpuBelow92, gpu92, gpuBelow97, gpu97, gpu100].allSatisfy { $0.size == gpu80.size },
+                      "GPU rendering \(name.rawValue)/\(density): warning changes preserve width")
                 check(coloredPixels(render(gpu: false, usage: 0.80, density: density, appearance: appearance)) > 0,
                       "CPU rendering \(name.rawValue)/\(density): 80% still has its warning color")
                 check(coloredPixels(render(gpu: false, usage: 1.0, density: density, appearance: appearance)) > 0,
@@ -682,6 +716,11 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
     static func main() {
         precondition(Bundle.main.bundleIdentifier != "com.local.syspulse",
                      "Regression tests must run as a raw isolated executable, never the installed app.")
+        if CommandLine.arguments.contains("--metric-colors-only") {
+            metricColors()
+            print("\n\(passed) focused metric color assertions passed.")
+            return
+        }
         memoryPressure()
         metricColors()
         network()
