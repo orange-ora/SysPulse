@@ -9,7 +9,7 @@ app.setActivationPolicy(.accessory)
 let releaseScreenshotsMode = CommandLine.arguments.contains("--release-screenshots")
 let interactiveMode = !releaseScreenshotsMode && CommandLine.arguments.contains("--interactive")
 let materialStudyMode = CommandLine.arguments.contains("--material-study")
-let detailOnlyMode = !releaseScreenshotsMode && ["--detail-only", "--detail-mid-only", "--detail-handoff-only", "--detail-jump-only", "--chrome-hover-only", "--slider-only"].contains { CommandLine.arguments.contains($0) }
+let detailOnlyMode = !releaseScreenshotsMode && ["--iridescent-film-only", "--presentation-only", "--detail-only", "--detail-idle-only", "--detail-mid-only", "--detail-handoff-only", "--detail-jump-only", "--chrome-hover-only", "--slider-only"].contains { CommandLine.arguments.contains($0) }
 let outputArgument = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("--") }
 let output = URL(fileURLWithPath: outputArgument ?? "build/panel-preview")
 if !interactiveMode {
@@ -163,7 +163,7 @@ func press(_ label: String, in hosting: NSView) {
     let point: NSPoint
     switch label {
     case "菜单栏显示网速": point = NSPoint(x: 88, y: hosting.bounds.height - 117)
-    case "打开显示与外观设置": point = NSPoint(x: 333, y: 26)
+    case "打开显示与外观设置": point = NSPoint(x: 333, y: 43)
     case "刷新频率，2 秒": point = NSPoint(x: 222, y: 91)
     case "菜单栏排版，双行": point = NSPoint(x: 222, y: 160)
     case "菜单栏光效，光晕": point = NSPoint(x: 236, y: hosting.bounds.height - 70)

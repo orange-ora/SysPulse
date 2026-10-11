@@ -389,12 +389,115 @@ private func reflected<T>(_ object: Any, _ name: String, as type: T.Type = T.sel
     return Mirror(reflecting: value).children.first?.value as? T
 }
 
+private var presentationLatencyRecords: [[String: Any]] = []
+
+@MainActor
+private final class PresentationLatencyClock {
+    var clickTimestamp: CFTimeInterval = 0
+    var didShowTimes: [Double] = []
+}
+
+/// 只观察生产控制器；10ms 样本记录模型窗口状态，不强制布局、绘制或停止采样。
+@MainActor
+private func measuredControllerOpening(_ name: String, controller: StatusItemController,
+                                       button: NSStatusBarButton, popover: NSPopover,
+                                       directAction: Bool = false) async -> [[String: Double]] {
+    let clock = PresentationLatencyClock()
+    let observer = NotificationCenter.default.addObserver(forName: NSPopover.didShowNotification,
+                                                          object: popover, queue: .main) { _ in
+        MainActor.assumeIsolated {
+            clock.didShowTimes.append((CACurrentMediaTime() - clock.clickTimestamp) * 1000)
+        }
+    }
+    defer { NotificationCenter.default.removeObserver(observer) }
+    let contentWasReleased = popover.contentViewController == nil
+    let sampler: SystemMonitor? = reflected(controller, "monitor")
+    let metricTimer: Timer? = sampler.flatMap { reflected($0, "timer", as: Timer.self) }
+    let effectTimer: Timer? = reflected(controller, "effectTimer")
+    let shared = Preferences.shared
+    var samples: [[String: Double]] = [["milliseconds": 0, "shown": 0, "alpha": 0, "height": 0,
+                                        "width": 0, "top": 0, "presentationActive": 0, "animating": 0]]
+    var firstPositiveAlpha: Double?
+    var firstNearOpaqueAlpha: Double?
+    var firstActiveAnimation: Double?
+    var finishedAnimation: Double?
+    // 起点在 action 分发之前，包含 SwiftUI 建树和 AppKit show 的同步准备。
+    clock.clickTimestamp = CACurrentMediaTime()
+    if directAction {
+        guard let action = button.action, app.sendAction(action, to: button.target, from: button) else {
+            fail("latency status button action dispatch")
+        }
+    } else {
+        button.performClick(nil)
+    }
+    let clickReturnTimestamp = CACurrentMediaTime()
+    let clickReturnMs = (clickReturnTimestamp - clock.clickTimestamp) * 1000
+    func sample() {
+        let now = (CACurrentMediaTime() - clock.clickTimestamp) * 1000
+        let window = popover.contentViewController?.view.window
+        let shown = popover.isShown
+        let alpha = window?.alphaValue ?? 0
+        let animation: PanelPresentationAnimation? = reflected(controller, "presentationAnimation")
+        let animating: Bool = reflected(controller, "isAnimating") ?? false
+        if shown && alpha > 0 && firstPositiveAlpha == nil { firstPositiveAlpha = now }
+        if shown && alpha >= 0.95 && firstNearOpaqueAlpha == nil { firstNearOpaqueAlpha = now }
+        if animation != nil && firstActiveAnimation == nil { firstActiveAnimation = now }
+        if shown && animation == nil && !animating && finishedAnimation == nil { finishedAnimation = now }
+        samples.append(["milliseconds": now, "shown": shown ? 1 : 0, "alpha": alpha,
+                        "height": window?.frame.height ?? 0, "width": window?.frame.width ?? 0,
+                        "top": window?.frame.maxY ?? 0, "presentationActive": animation == nil ? 0 : 1,
+                        "animating": animating ? 1 : 0])
+    }
+    // 保留原来的 32 帧几何观察；只有未完成时才延长观察，超时只记录而不作时间断言。
+    for _ in 0..<32 {
+        sample()
+        await settle(0.01)
+    }
+    while finishedAnimation == nil && CACurrentMediaTime() - clickReturnTimestamp < 2 {
+        sample()
+        await settle(0.01)
+    }
+    let intervals = zip(samples, samples.dropFirst()).map { $1["milliseconds"]! - $0["milliseconds"]! }
+    let postReturnIntervals = zip(samples.dropFirst(), samples.dropFirst(2)).map {
+        $1["milliseconds"]! - $0["milliseconds"]!
+    }
+    let opening = samples.filter { $0["shown"] == 1 }
+    var record: [String: Any] = ["name": name, "reduceMotion": probeReducedMotion,
+        "effect": shared.menuBarEffect.rawValue, "layout": shared.menuBarLayout.rawValue,
+        "refreshIntervalSeconds": shared.refreshInterval, "contentReleasedBeforeClick": contentWasReleased,
+        "metricTimerActiveBeforeClick": metricTimer?.isValid == true,
+        "effectTimerActiveBeforeClick": effectTimer?.isValid == true,
+        "clickMonotonicSeconds": clock.clickTimestamp, "dispatchMethod": directAction ? "sendAction" : "performClick",
+        "dispatchReturnedMs": clickReturnMs,
+        "didShowNotificationMs": clock.didShowTimes,
+        "maximumSampleGapMs": intervals.max() ?? 0,
+        "maximumPostReturnSampleGapMs": postReturnIntervals.max() ?? 0,
+        "requestedSampleIntervalMs": 10, "sampleCount": samples.count,
+        "windowHeightProgress": opening.map { ["milliseconds": $0["milliseconds"]!, "height": $0["height"]!] },
+        "samples": samples,
+        "timingSemantics": "All milliseconds start before dispatch. performClick can include simulated button-highlight delay; compare matching dispatch methods. Alpha and animation endpoints are observed model states at 10ms polling, not WindowServer first-pixel timestamps. The initial sample gap includes synchronous dispatch blocking."]
+    record["performClickReturnedMs"] = directAction ? NSNull() : clickReturnMs as Any
+    record["firstAlphaPositiveMs"] = firstPositiveAlpha.map { $0 as Any } ?? NSNull()
+    record["firstAlphaAtLeast095Ms"] = firstNearOpaqueAlpha.map { $0 as Any } ?? NSNull()
+    record["firstObservedPresentationActiveMs"] = firstActiveAnimation.map { $0 as Any } ?? NSNull()
+    record["animationFinishedMs"] = finishedAnimation.map { $0 as Any } ?? NSNull()
+    presentationLatencyRecords.append(record)
+    try! JSONSerialization.data(withJSONObject: presentationLatencyRecords, options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("controller-presentation-latency.json"))
+    let metrics = ["dispatchReturnedMs", "firstAlphaPositiveMs", "firstAlphaAtLeast095Ms", "animationFinishedMs", "maximumSampleGapMs", "maximumPostReturnSampleGapMs"]
+        .map { "\($0)=\(record[$0]!)" }.joined(separator: " ")
+    print("PRESENTATION-LATENCY \(name): \(metrics) didShowMs=\(clock.didShowTimes)")
+    fflush(stdout)
+    return opening
+}
+
 @MainActor
 private func controllerChecks() async {
     // Preferences.shared uses runner's CFFIXED_USER_HOME, not the installed app's preferences.
     let shared = Preferences.shared
     shared.resetDisplaySettings()
-    shared.menuBarEffect = .diffuse
+    shared.menuBarEffect = .iridescent
+    shared.menuBarLayout = .compact
     let controller = StatusItemController()
     guard let item: NSStatusItem = reflected(controller, "statusItem"),
           let popover: NSPopover = reflected(controller, "popover"), let button = item.button else { fail("inspect own controller native status item") }
@@ -403,14 +506,9 @@ private func controllerChecks() async {
         probeReducedMotion = reduced
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         await settle(0.1)
-        button.performClick(nil)
-        var opening: [[String: Double]] = []
-        for _ in 0..<32 {
-            if let window = popover.contentViewController?.view.window, popover.isShown {
-                opening.append(["width": window.frame.width, "height": window.frame.height, "top": window.frame.maxY, "alpha": window.alphaValue])
-            }
-            await settle(0.01)
-        }
+        let opening = await measuredControllerOpening(reduced ? "reduce-motion-first-in-mode-sendAction" : "normal-cold-first-sendAction",
+                                                       controller: controller, button: button, popover: popover,
+                                                       directAction: true)
         check(popover.isShown, "production controller " + (reduced ? "reduced" : "normal") + " actual status action opens native popover")
         guard let panel = popover.contentViewController as? PanelContentController,
               let window = panel.view.window else { fail("production full-window content container") }
@@ -429,14 +527,23 @@ private func controllerChecks() async {
         }
         save(panel.view, name: reduced ? "controller-reduced-open-native" : "controller-normal-open-native")
         let originalFrame = window.frame
+        guard let document = panel.view.subviews.last, let documentLayer = document.layer else {
+            fail("production document container")
+        }
+        let originalDocumentSize = document.frame.size
+        var documentStaysRigid = true
         button.performClick(nil)
         var closing: [[String: Double]] = []
         var receiptSeen = false
         for _ in 0..<34 {
             closing.append(["width": window.frame.width, "height": window.frame.height, "alpha": window.alphaValue])
+            documentStaysRigid = documentStaysRigid && document.frame.size == originalDocumentSize &&
+                CATransform3DIsIdentity(documentLayer.transform) &&
+                CATransform3DIsIdentity(documentLayer.presentation()?.transform ?? documentLayer.transform)
             receiptSeen = receiptSeen || button.layer?.animation(forKey: "panel.receipt") != nil
             await settle(0.01)
         }
+        check(documentStaysRigid, "production close keeps document at natural size without model or presentation deformation")
         check(!popover.isShown, "production controller " + (reduced ? "reduced" : "normal") + " closes native popover")
         if !reduced {
             check((closing.map { $0["height"]! }.min() ?? .infinity) < originalFrame.height - 100,
@@ -445,10 +552,11 @@ private func controllerChecks() async {
                   "normal production close contracts actual native window width")
             check(receiptSeen, "normal close completion installs actual menu receipt animation")
             // 收束期间再次用原状态按钮触发重开，确认真实窗口可恢复。
-            button.performClick(nil)
-            await settle(0.30)
+            _ = await measuredControllerOpening("normal-repeated-1", controller: controller, button: button, popover: popover)
             button.performClick(nil)
             await settle(0.07)
+            check(document.frame.size == originalDocumentSize && CATransform3DIsIdentity(documentLayer.transform),
+                  "production interrupted close preserves rigid natural document geometry")
             button.performClick(nil)
             await settle(0.35)
             check(popover.isShown, "production close interrupted by status click reverses and reopens")
@@ -466,49 +574,363 @@ private func controllerChecks() async {
             .write(to: output.appendingPathComponent(reduced ? "controller-reduced-animation.json" : "controller-normal-animation.json"))
     }
     probeReducedMotion = false
-    if let glass: NSView = reflected(controller, "statusGlassView"),
-       let reflection: CAGradientLayer = reflected(glass, "hoverReflection"),
-       let edge: CAGradientLayer = reflected(glass, "hoverHighlight") {
-        let roots = allViews(glass).compactMap(\.layer)
-        check(roots.flatMap(allLayers).allSatisfy { $0.shadowOpacity == 0 }, "actual status glass hierarchy has no active depth shadow")
-        shared.menuBarEffect = .diffuse
-        await settle(0.25)
-        let enabled: Bool = reflected(glass, "hoverEnabled") ?? false
-        let tracking: NSTrackingArea? = reflected(glass, "hoverTrackingArea")
-        let glassScreen = glass.window?.convertToScreen(glass.convert(glass.bounds, to: nil)) ?? .zero
-        check(shared.menuBarEffect == .diffuse && enabled, "menu hover diagnostic has non-off effect and enabled receiver")
-        check(tracking != nil, "menu hover diagnostic has an installed native tracking area")
-        check(!glass.visibleRect.isEmpty && NSScreen.screens.contains { $0.frame.intersects(glassScreen) },
-              "menu hover diagnostic glass is visible and on current screen")
-        let quarter = NSPoint(x: glass.bounds.width * 0.25, y: glass.bounds.midY)
-        hover(glass, quarter)
-        await settle(0.3)
-        let expectedPointer = glass.window?.convertPoint(toScreen: glass.convert(quarter, to: nil)) ?? .zero
-        let actualPointer = NSEvent.mouseLocation
-        check(hypot(expectedPointer.x - actualPointer.x, expectedPointer.y - actualPointer.y) < 3,
-              "menu hover diagnostic physical pointer reaches correctly converted screen coordinate")
-        let diagnostic: [String: Any] = ["effect": shared.menuBarEffect.rawValue, "hoverEnabled": enabled,
-            "trackingArea": tracking != nil, "glassFrame": NSStringFromRect(glassScreen),
-            "visibleRect": NSStringFromRect(glass.visibleRect), "pointerExpected": NSStringFromPoint(expectedPointer),
-            "pointerActual": NSStringFromPoint(actualPointer), "cgReflectionOpacity": reflection.opacity,
-            "cgEdgeOpacity": edge.opacity]
-        try! JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted, .sortedKeys])
-            .write(to: output.appendingPathComponent("menu-hover-diagnostic.json"))
-        nativeTrackingEvent(glass, quarter)
-        await settle(0.3)
-        let first = reflection.startPoint
-        check(reflection.opacity > 0 && edge.opacity > 0, "native status tracking event activates actual reflection and edge layers")
-        nativeTrackingEvent(glass, NSPoint(x: glass.bounds.width * 0.75, y: glass.bounds.midY))
-        await settle(0.3)
-        check(reflection.startPoint != first, "native status reflection changes direction for local tracking event")
-        shared.menuBarEffect = .off
-        await settle(0.2)
-        check(reflection.opacity == 0 && edge.opacity == 0, "off effect disables native menu hover layers")
-    } else {
-        nativeNotes.append("No native status-glass view available on this macOS: menu reflection-layer branch not exercised.")
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    await settle(0.1)
+    for repetition in 2...3 {
+        _ = await measuredControllerOpening("normal-repeated-\(repetition)-sendAction", controller: controller,
+                                            button: button, popover: popover, directAction: true)
+        button.performClick(nil)
+        await settle(0.45)
     }
+    guard let glass: NSView = reflected(controller, "statusGlassView") else { fail("production liquid star glass") }
+    if let sampler: SystemMonitor = reflected(controller, "monitor"),
+       let samplingTimer: Timer = reflected(sampler, "timer") { samplingTimer.invalidate() }
+    await settle(0.05)
+    let roots = allViews(glass).compactMap(\.layer)
+    check(roots.flatMap(allLayers).allSatisfy { $0.shadowOpacity == 0 },
+          "actual liquid star glass hierarchy has no active depth shadow")
+    await verifyDisabledStatusOptics(glass)
+    shared.menuBarEffect = .off
+    await settle(0.2)
+    let disabled: NSView? = reflected(controller, "statusGlassView")
+    check(disabled == nil && glass.superview == nil,
+          "off removes the native liquid glass background and optical layers")
     NSStatusBar.system.removeStatusItem(item)
     shared.resetDisplaySettings()
+}
+
+@MainActor
+private func verifyFilmDuringPresentation(_ name: String, controller: StatusItemController,
+                                         button: NSStatusBarButton, popover: NSPopover,
+                                         film: NSImageView, glyphs: NSImageView, interrupt: Bool = false) async {
+    // 10ms asynchronous samples yield to the real display link and 10fps particle timer.
+    // The isolated metric sampler is paused so the letter mask stays identical throughout.
+    let initialGlyphs = glyphs.image
+    let initialGlyphPixels = nativeGlyphPixels(initialGlyphs)
+    let sampler: SystemMonitor? = reflected(controller, "monitor")
+    let initialSnapshotTime = sampler?.snapshot.timestamp.timeIntervalSinceReferenceDate ?? -1
+    let initialAppearance = button.effectiveAppearance.name.rawValue
+    // Capture only image replacements: polling must not force background drawing itself.
+    var previousImage = film.image
+    var previousPixels = previousImage?.tiffRepresentation
+    var samples: [[String: Any]] = []
+    var updateTimes: [Double] = []
+    var pixelUpdateTimes: [Double] = []
+    var activeSamples = 0
+    var firstActiveTime: Double?
+    var interruptedAt: Double?
+    var activeHeights: [CGFloat] = []
+    button.performClick(nil)
+    let start = CACurrentMediaTime()
+    while CACurrentMediaTime() - start < 0.60 {
+        let time = CACurrentMediaTime() - start
+        let animation: PanelPresentationAnimation? = reflected(controller, "presentationAnimation")
+        let active = animation != nil
+        if active {
+            activeSamples += 1
+            if firstActiveTime == nil { firstActiveTime = time }
+        }
+        let image = film.image
+        let replaced = image !== previousImage
+        var pixelsChanged = false
+        if replaced {
+            let pixels = image?.tiffRepresentation
+            pixelsChanged = pixels != nil && previousPixels != nil && pixels != previousPixels
+            previousImage = image
+            previousPixels = pixels
+            // Ignore synchronous setup; the assertion concerns actual timed animation frames.
+            if active && time > 0.02 {
+                updateTimes.append(time)
+                if pixelsChanged { pixelUpdateTimes.append(time) }
+            }
+        }
+        let window = popover.contentViewController?.view.window
+        if active, let window { activeHeights.append(window.frame.height) }
+        let effectTime: Double = reflected(controller, "effectElapsed") ?? -1
+        let currentSamplingTimer: Timer? = sampler.flatMap { reflected($0, "timer", as: Timer.self) }
+        samples.append(["seconds": time, "presentationActive": active,
+                        "foregroundCached": glyphs.image === initialGlyphs,
+                        "foregroundPixelsUnchanged": glyphs.image === initialGlyphs || nativeGlyphPixels(glyphs.image) == initialGlyphPixels,
+                        "snapshotTime": sampler?.snapshot.timestamp.timeIntervalSinceReferenceDate ?? -1,
+                        "samplingTimerActive": currentSamplingTimer?.isValid == true,
+                        "appearance": button.effectiveAppearance.name.rawValue,
+                        "backgroundReplaced": replaced, "backgroundPixelsChanged": pixelsChanged,
+                        "effectElapsed": effectTime, "windowHeight": window?.frame.height ?? 0,
+                        "popoverShown": popover.isShown, "afterInterruption": interruptedAt != nil])
+        if interrupt, interruptedAt == nil, let firstActiveTime, time - firstActiveTime >= 0.11 {
+            interruptedAt = time
+            button.performClick(nil)
+        }
+        await settle(0.01)
+    }
+    let intervals = zip(updateTimes, updateTimes.dropFirst()).map { $1 - $0 }
+    let sampleIntervals = zip(samples, samples.dropFirst()).map {
+        ($1["seconds"] as! Double) - ($0["seconds"] as! Double)
+    }
+    let report: [String: Any] = ["name": name, "samples": samples,
+        "initialSnapshotTime": initialSnapshotTime, "initialAppearance": initialAppearance,
+        "activeSamples": activeSamples, "activeBackgroundUpdates": updateTimes,
+        "activePixelUpdates": pixelUpdateTimes, "activeUpdateIntervals": intervals,
+        "maximumSampleGap": sampleIntervals.max() ?? 0,
+        "interruptionSeconds": interruptedAt ?? -1]
+    try! JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("iridescent-" + name + "-presentation-frames.json"))
+    print("FILM-PRESENTATION \(name): activeSamples=\(activeSamples), updates=\(updateTimes), pixelUpdates=\(pixelUpdateTimes), maxSampleGap=\(sampleIntervals.max() ?? 0)")
+    fflush(stdout)
+    check(activeSamples >= 3 && (activeHeights.max() ?? 0) - (activeHeights.min() ?? 0) > 20,
+          "iridescent \(name) exercises a real animated native-window transition")
+    let repeatedOpeningFrames = name != "open" || (pixelUpdateTimes.count >= 2 &&
+        pixelUpdateTimes.last! - pixelUpdateTimes.first! >= 0.06)
+    // A short native close can span only one timer tick; opening must exclude one-off setup redraws.
+    check(!updateTimes.isEmpty && !pixelUpdateTimes.isEmpty && repeatedOpeningFrames &&
+          samples.filter { $0["presentationActive"] as! Bool }.allSatisfy { $0["foregroundCached"] as! Bool },
+          "liquid star glass \(name) redraws drifting stars while keeping cached foreground during presentation")
+    if interrupt {
+        check(interruptedAt != nil && pixelUpdateTimes.contains { $0 > interruptedAt! },
+              "iridescent \(name) continues visible film updates after mid-animation reversal")
+    }
+}
+
+@MainActor
+private func verifyDisabledStatusOptics(_ glass: NSView) async {
+    let bounds = glass.bounds
+    guard let glyphs: NSImageView = reflected(glass, "imageView"),
+          let content = glyphs.superview else { fail("liquid star glass foreground") }
+    let foreground = glyphs.image
+    nativeTrackingEvent(glass, NSPoint(x: glass.bounds.width * 0.25, y: glass.bounds.midY))
+    await settle(0.20)
+    nativeTrackingEvent(glass, NSPoint(x: glass.bounds.width * 0.75, y: glass.bounds.midY))
+    await settle(0.20)
+    let reflection: CAGradientLayer? = reflected(glass, "hoverReflection")
+    let edge: CAGradientLayer? = reflected(glass, "hoverHighlight")
+    let enabled: Bool = reflected(glass, "hoverEnabled") ?? false
+    check(!enabled && glass.trackingAreas.isEmpty && (reflection?.opacity ?? 0) == 0 && (edge?.opacity ?? 0) == 0,
+          "liquid star glass installs no hover tracking or bright reflection layers")
+    check(CATransform3DIsIdentity(content.layer!.transform) &&
+          CATransform3DIsIdentity(content.layer!.presentation()?.transform ?? content.layer!.transform),
+          "liquid star glass has no pointer tilt or animated foreground transform")
+    check(glass.bounds == bounds && glyphs.image === foreground &&
+          glass.hitTest(NSPoint(x: bounds.midX, y: bounds.midY)) == nil,
+          "native pointer events preserve cached foreground and system button hit geometry")
+}
+
+@MainActor
+private func nativeGlyphPixels(_ image: NSImage?) -> Data? {
+    guard let image else { return nil }
+    let width = Int(ceil(image.size.width * 2))
+    let height = Int(ceil(image.size.height * 2))
+    guard width > 0, height > 0,
+          let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                        isPlanar: false, colorSpaceName: .deviceRGB,
+                                        bytesPerRow: width * 4, bitsPerPixel: 32),
+          let pixels = bitmap.bitmapData,
+          let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+    pixels.initialize(repeating: 0, count: bitmap.bytesPerRow * height)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    image.draw(in: NSRect(x: 0, y: 0, width: width, height: height),
+               from: .zero, operation: .copy, fraction: 1)
+    context.flushGraphics()
+    NSGraphicsContext.restoreGraphicsState()
+    return Data(bytes: pixels, count: bitmap.bytesPerRow * height)
+}
+
+@MainActor
+private func verifyNativeBackgroundSwitching(controller: StatusItemController, button: NSStatusBarButton,
+                                             initialGlass: NSView, initialGlyphs: NSImageView) async {
+    let shared = Preferences.shared
+    let originalBounds = button.bounds
+    let originalGlyphSize = initialGlyphs.image!.size
+    guard let originalGlyphPixels = nativeGlyphPixels(initialGlyphs.image) else { fail("background switch foreground raster") }
+    var previousRoot = initialGlass
+    var previousMode = MenuBarEffect.iridescent
+    var legacyPixels: Data?
+    var detachedRoots: [NSView] = []
+    for mode in [MenuBarEffect.glow, .diffuse, .iridescent] {
+        shared.menuBarEffect = mode
+        await settle(0.25)
+        guard let root: NSView = reflected(controller, "statusGlassView"),
+              let glyphs: NSImageView = reflected(root, "imageView"),
+              let background: NSImageView = reflected(root, "backgroundImageView"),
+              let material: NSView = reflected(root, "materialView"),
+              let content = glyphs.superview else { fail("native background switch \(mode)") }
+        let usesGlass: Bool = reflected(root, "usesGlass") ?? false
+        check(shared.menuBarEffect == mode && usesGlass == (mode == .iridescent),
+              "native switching selects \(mode.rawValue) with the correct material path")
+        if previousMode == .iridescent || mode == .iridescent {
+            check(root !== previousRoot && previousRoot.superview == nil && root.superview === button,
+                  "native switch \(previousMode.rawValue)-\(mode.rawValue) detaches the old material root")
+            detachedRoots.append(previousRoot)
+        } else {
+            check(root === previousRoot && background === material,
+                  "glow-to-diffuse reuses the plain image root while changing its background")
+        }
+        check(button.bounds == originalBounds && root.frame == button.bounds &&
+              glyphs.image?.size == originalGlyphSize && glyphs.imageScaling == .scaleNone &&
+              nativeGlyphPixels(glyphs.image) == originalGlyphPixels &&
+              root.hitTest(NSPoint(x: root.bounds.midX, y: root.bounds.midY)) == nil,
+              "switching to \(mode.rawValue) preserves readable glyph pixels and the native button hit geometry")
+        let firstBackground = background.image
+        let firstPixels = firstBackground?.tiffRepresentation
+        await settle(0.25)
+        check(firstPixels != nil && background.image !== firstBackground && background.image?.tiffRepresentation != firstPixels,
+              "\(mode.rawValue) native background visibly updates after switching")
+        if mode == .iridescent {
+            check(background !== material && content.subviews.count == 3 &&
+                  content.subviews[0] === material && content.subviews[1] === background && content.subviews[2] === glyphs,
+                  "returning to liquid glass restores separate native material, masked stars and foreground layers")
+            if #available(macOS 26.0, *) {
+                check((material as? NSGlassEffectView)?.style == .clear &&
+                      (material as? NSGlassEffectView)?.tintColor == nil,
+                      "returning to liquid glass retains its clear untinted native material")
+            }
+            await verifyDisabledStatusOptics(root)
+        } else {
+            check(background === material && content.subviews.count == 2 &&
+                  content.subviews[0] === background && content.subviews[1] === glyphs,
+                  "\(mode.rawValue) uses only its own background image and stable foreground without residual glass")
+            if #available(macOS 26.0, *) {
+                check(!(material is NSGlassEffectView), "\(mode.rawValue) does not retain liquid-glass material")
+            }
+            let enabled: Bool = reflected(root, "hoverEnabled") ?? false
+            nativeTrackingEvent(root, NSPoint(x: root.bounds.width * 0.25, y: root.bounds.midY))
+            await settle(0.20)
+            let reflection: CAGradientLayer? = reflected(root, "hoverReflection")
+            let edge: CAGradientLayer? = reflected(root, "hoverHighlight")
+            check(enabled && !root.trackingAreas.isEmpty && reflection?.opacity == 1 && edge?.opacity == 1,
+                  "\(mode.rawValue) preserves its original active native hover reflection path")
+            if mode == .diffuse {
+                check(legacyPixels != nil && background.image?.tiffRepresentation != legacyPixels,
+                      "diffuse replaces the glow background pixels on the reused root")
+            }
+            legacyPixels = background.image?.tiffRepresentation
+        }
+        previousRoot = root
+        previousMode = mode
+    }
+    check(detachedRoots.allSatisfy { root in
+        let reflection: CAGradientLayer? = reflected(root, "hoverReflection")
+        let edge: CAGradientLayer? = reflected(root, "hoverHighlight")
+        let glyphs: NSImageView? = reflected(root, "imageView")
+        return root.superview == nil && root.trackingAreas.isEmpty &&
+            (reflection?.opacity ?? 0) == 0 && (edge?.opacity ?? 0) == 0 &&
+            CATransform3DIsIdentity(glyphs?.superview?.layer?.transform ?? CATransform3DIdentity)
+    }, "returning to liquid glass leaves no active reflection or tilt on detached roots")
+    shared.menuBarEffect = .off
+    await settle(0.20)
+    let disabled: NSView? = reflected(controller, "statusGlassView")
+    let clock: Timer? = reflected(controller, "effectTimer")
+    let offDiagnostic: [String: Any] = ["rootRemoved": disabled == nil,
+        "oldRootDetached": previousRoot.superview == nil, "clockActive": clock?.isValid == true,
+        "originalBounds": NSStringFromRect(originalBounds), "offBounds": NSStringFromRect(button.bounds),
+        "originalGlyphSize": NSStringFromSize(originalGlyphSize), "offImageSize": NSStringFromSize(button.image?.size ?? .zero),
+        "sameGlyphPixels": nativeGlyphPixels(button.image) == originalGlyphPixels]
+    try! JSONSerialization.data(withJSONObject: offDiagnostic, options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("native-background-switch-off-diagnostic.json"))
+    print("BACKGROUND-OFF \(offDiagnostic)")
+    fflush(stdout)
+    check(disabled == nil && previousRoot.superview == nil && clock?.isValid != true &&
+          button.bounds == originalBounds && button.image?.size == originalGlyphSize &&
+          nativeGlyphPixels(button.image) == originalGlyphPixels,
+          "off removes the custom background roots, stops the effect clock and restores unchanged direct glyphs")
+}
+
+@MainActor
+private func verifyIridescentFilm() async {
+    let shared = Preferences.shared
+    shared.resetDisplaySettings()
+    // Real installed status items may move while the probe runs; background choice is
+    // independent of auto-density decisions, so hold that input fixed in this fixture.
+    shared.menuBarLayout = .compact
+    shared.menuBarEffect = .iridescent
+    let controller = StatusItemController()
+    guard let item: NSStatusItem = reflected(controller, "statusItem"),
+          let popover: NSPopover = reflected(controller, "popover"),
+          let button = item.button else { fail("film status item") }
+    defer {
+        popover.performClose(nil)
+        NSStatusBar.system.removeStatusItem(item)
+        shared.resetDisplaySettings()
+    }
+    await settle(0.65)
+    guard let sampler: SystemMonitor = reflected(controller, "monitor"),
+          let samplingTimer: Timer = reflected(sampler, "timer") else { fail("isolated metric sampler") }
+    samplingTimer.invalidate()
+    await settle(0.05)
+    guard let glass: NSView = reflected(controller, "statusGlassView"),
+          let glyphs: NSImageView = reflected(glass, "imageView"),
+          let film: NSImageView = reflected(glass, "backgroundImageView"),
+          let material: NSView = reflected(glass, "materialView"),
+          let content = glyphs.superview else { fail("film native hierarchy") }
+    let subviews = content.subviews
+    check(film.superview === content && subviews.firstIndex(of: material)! < subviews.firstIndex(of: film)! &&
+          subviews.firstIndex(of: film)! < subviews.firstIndex(of: glyphs)!,
+          "iridescent film sits above native material and below readable glyphs")
+    if #available(macOS 26.0, *) {
+        check((material as? NSGlassEffectView)?.style == .clear &&
+              (material as? NSGlassEffectView)?.tintColor == nil,
+              "iridescent film preserves the native clear untinted glass material")
+    }
+    check(film.frame == content.bounds && film.image != nil && glyphs.imageScaling == .scaleNone,
+          "film fills the glass while foreground glyphs retain intrinsic sizing")
+    check(glass.hitTest(NSPoint(x: glass.bounds.midX, y: glass.bounds.midY)) == nil,
+          "film overlay preserves the system status button hit target")
+    let firstGlyph = glyphs.image
+    let firstFilm = film.image
+    let firstPixels = firstFilm?.tiffRepresentation
+    let bounds = glass.bounds
+    await settle(0.25)
+    let particleTimer: Timer? = reflected(controller, "effectTimer")
+    check(particleTimer?.isValid == true && glyphs.image === firstGlyph && film.image !== firstFilm &&
+          firstPixels != nil && film.image?.tiffRepresentation != firstPixels,
+          "particle clock redraws visibly drifting stars while reusing the same cached glyph image")
+    check(glass.bounds == bounds && film.frame == content.bounds,
+          "animated film leaves menu layout and hit bounds unchanged")
+    await verifyFilmDuringPresentation("open", controller: controller, button: button, popover: popover, film: film, glyphs: glyphs)
+    check(popover.isShown, "film continuity opening finishes with the production popover shown")
+    let expandedFrame = popover.contentViewController!.view.window!.frame
+    await verifyFilmDuringPresentation("close", controller: controller, button: button, popover: popover, film: film, glyphs: glyphs)
+    check(!popover.isShown, "film continuity closing finishes with the production popover closed")
+    await verifyFilmDuringPresentation("open-close", controller: controller, button: button, popover: popover,
+                                     film: film, glyphs: glyphs, interrupt: true)
+    check(!popover.isShown, "film continuity interrupted opening finishes at the closed endpoint")
+    button.performClick(nil)
+    await settle(0.40)
+    check(popover.isShown, "film continuity reversal fixture begins from an expanded popover")
+    await verifyFilmDuringPresentation("close-reopen", controller: controller, button: button, popover: popover,
+                                     film: film, glyphs: glyphs, interrupt: true)
+    check(popover.isShown && abs(popover.contentViewController!.view.window!.frame.height - expandedFrame.height) < 1,
+          "film continuity interrupted closing restores the expanded native-window height")
+    button.performClick(nil)
+    await settle(0.35)
+    if let currentSamplingTimer: Timer = reflected(sampler, "timer") { currentSamplingTimer.invalidate() }
+    await settle(0.05)
+    await verifyDisabledStatusOptics(glass)
+    probeReducedMotion = true
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    await settle(0.25)
+    let staticFilm = film.image?.tiffRepresentation
+    await settle(0.25)
+    let expected = MenuBarImage.background(size: glyphs.image!.size, appearance: button.effectiveAppearance,
+                                          effect: .iridescent, elapsed: 0, foreground: glyphs.image)?.tiffRepresentation
+    check(staticFilm != nil && film.image?.tiffRepresentation == staticFilm && staticFilm == expected,
+          "Reduce Motion retains a stable time-zero glass film across background clock ticks")
+    check(CATransform3DIsIdentity(content.layer!.transform),
+          "Reduce Motion centers the native glass without pointer tilt")
+    probeReducedMotion = false
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    await settle(0.20)
+    if let currentSamplingTimer: Timer = reflected(sampler, "timer") { currentSamplingTimer.invalidate() }
+    await settle(0.05)
+    await verifyNativeBackgroundSwitching(controller: controller, button: button,
+                                         initialGlass: glass, initialGlyphs: glyphs)
+    shared.menuBarEffect = .off
+    await settle(0.2)
+    let disabled: NSView? = reflected(controller, "statusGlassView")
+    check(disabled == nil && glass.superview == nil,
+          "off removes liquid glass and its drifting star background")
+    probeReducedMotion = false
 }
 
 private final class RootMarkerView: NSView {
@@ -646,6 +1068,57 @@ private final class DetailCadenceRecorder: NSObject {
 }
 
 @MainActor
+private func clickActualDetailClose(_ name: String, panel: PanelContentController, host: NSView) {
+    guard let window = host.window,
+          let detailHost = allViews(host).first(where: { $0.identifier?.rawValue == "panel.detail.host" }),
+          let clip = allViews(host).first(where: { $0.identifier?.rawValue == "panel.detail.clip" }) else {
+        fail(name + " actual native detail close hosts")
+    }
+    let axElements = accessibilityElements(window)
+    let element = axElements.first(where: {
+        accessibilityAttribute($0, "accessibilityLabel") as? String == "收起明细"
+    }) as? NSAccessibilityProtocol
+    let axFrame = element?.accessibilityFrame() ?? .zero
+    let nativeButtonRect = NSRect(x: detailHost.bounds.maxX - 30,
+                                  y: detailHost.isFlipped ? detailHost.bounds.minY + 10 : detailHost.bounds.maxY - 30,
+                                  width: 20, height: 20)
+    let screenFrame = axFrame.width > 0 && axFrame.height > 0 ? axFrame :
+        window.convertToScreen(detailHost.convert(nativeButtonRect, to: nil))
+    let screenPoint = NSPoint(x: screenFrame.midX, y: screenFrame.midY)
+    let windowPoint = window.convertPoint(fromScreen: screenPoint)
+    let localPoint = host.convert(windowPoint, from: nil)
+    let actualHit = host.hitTest(host.convert(localPoint, to: host.superview))
+    let legacyPoint = NSPoint(x: 326, y: 379.5)
+    let legacyHit = host.hitTest(host.convert(legacyPoint, to: host.superview))
+    let acceptsHits: Bool = reflected(clip, "acceptsHits") ?? false
+    let hitInDetail = actualHit === detailHost || actualHit?.isDescendant(of: detailHost) == true
+    let legacyInDetail = legacyHit === detailHost || legacyHit?.isDescendant(of: detailHost) == true
+    let section = allViews(host).first { String(describing: type(of: $0)) == "PanelDetailSectionView" }
+    let animation: PanelDetailAnimation? = section.flatMap { reflected($0, "animation", as: PanelDetailAnimation.self) }
+    let targetExpanded: Bool = animation.flatMap { reflected($0, "targetExpanded", as: Bool.self) } ?? false
+    let record: [String: Any] = ["name": name, "screenFrame": NSStringFromRect(screenFrame),
+        "coordinateSource": axFrame.width > 0 && axFrame.height > 0 ? "accessibilityFrame" : "nativeDetailHostButtonFrame",
+        "accessibilityLabels": axElements.compactMap { accessibilityAttribute($0, "accessibilityLabel") as? String },
+        "detailHostFlipped": detailHost.isFlipped,
+        "actualHostPoint": NSStringFromPoint(localPoint), "legacyHostPoint": NSStringFromPoint(legacyPoint),
+        "detailHostFrame": NSStringFromRect(host.convert(detailHost.bounds, from: detailHost)),
+        "clipFrame": NSStringFromRect(host.convert(clip.bounds, from: clip)),
+        "clipAcceptsHits": acceptsHits, "clipHidden": clip.isHidden, "clipAlpha": clip.alphaValue,
+        "targetExpanded": targetExpanded, "hitInDetail": hitInDetail, "legacyHitInDetail": legacyInDetail,
+        "actualHitClass": actualHit.map { String(describing: type(of: $0)) } ?? "nil",
+        "legacyHitClass": legacyHit.map { String(describing: type(of: $0)) } ?? "nil"]
+    try! JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent(name + "-close-hit.json"))
+    print("DETAIL-CLOSE-HIT \(record)")
+    fflush(stdout)
+    check(screenFrame.width > 0 && screenFrame.height > 0 && acceptsHits && !clip.isHidden &&
+          clip.alphaValue > 0 && targetExpanded && hitInDetail,
+          name + " actual close button center is enabled and hits the expanded native detail host")
+    // 仍分发真实 mouseDown/up，不用 AX press 绕过原生 hitTest。
+    click(host, localPoint)
+}
+
+@MainActor
 private func focusedDetailTrace(_ name: String, reduced: Bool, panel: PanelContentController,
                                 host: NSView, action: () -> Void) async {
     var sizeWrites = 0
@@ -766,6 +1239,56 @@ private func sliderDrag(_ host: NSView, y: CGFloat) async -> [Double] {
 }
 
 @MainActor
+private func verifyFastSliderDrag(_ tag: String, host: NSView, y: CGFloat) async {
+    guard let window = host.window else { fail("fast slider drag without window") }
+    func send(_ type: NSEvent.EventType, x: CGFloat) {
+        guard let event = NSEvent.mouseEvent(with: type,
+            location: host.convert(NSPoint(x: x, y: y), to: nil), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+            else { fail("fast slider native mouse event") }
+        app.sendEvent(event)
+    }
+    let positions: [CGFloat] = [282, 72, 300, 54, 246, 108, 270]
+    send(.leftMouseDown, x: 180)
+    await settle(0.02)
+    for (index, x) in positions.enumerated() {
+        send(.leftMouseDragged, x: x)
+        await settle(0.02)
+        let value = preferences.panelTransparency
+        check(abs(value - Double((x - 30) / 300)) < 0.006,
+              tag + " rapid reversal keeps value attached to pointer " + String(index))
+        let bitmap = bodyBitmap(host, name: tag + "-fast-drag-" + String(index))
+        let center = 30 + 300 * CGFloat(value)
+        // 小块核心避开玻璃折射边缘；受控背景为中性浅色，漏入蓝紫或金色会显著提高色差。
+        let rect = NSRect(x: center - 3, y: y - 6, width: 6, height: 4)
+        let sx = CGFloat(bitmap.pixelsWide) / host.bounds.width
+        let sy = CGFloat(bitmap.pixelsHigh) / host.bounds.height
+        var colored = 0
+        var sampled = 0
+        for py in Int(rect.minY * sy)..<Int(rect.maxY * sy) {
+            for px in Int(rect.minX * sx)..<Int(rect.maxX * sx) {
+                guard let color = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB) else { continue }
+                let components = [color.redComponent, color.greenComponent, color.blueComponent]
+                if components.max()! - components.min()! > 0.20 { colored += 1 }
+                sampled += 1
+            }
+        }
+        print("SLIDER-FAST \(tag) \(index): value=\(value) colored-core=\(colored)/\(sampled)")
+        check(sampled > 0 && Double(colored) / Double(sampled) < 0.08,
+              tag + " rapid reversal keeps saturated fluid out of knob core " + String(index))
+        sliderZoom(bitmap, region: NSRect(x: 10, y: y - 20, width: 340, height: 40),
+                   size: host.bounds.size, name: tag + "-fast-drag-" + String(index))
+    }
+    send(.leftMouseUp, x: positions.last!)
+    await settle(0.06)
+    let released = bodyBitmap(host, name: tag + "-fast-release")
+    sliderZoom(released, region: NSRect(x: 10, y: y - 20, width: 340, height: 40),
+               size: host.bounds.size, name: tag + "-fast-release")
+    await settle(0.45)
+}
+
+@MainActor
 private func sliderZoom(_ bitmap: NSBitmapImageRep, region: NSRect, size: NSSize, name: String) {
     guard let cg = bitmap.cgImage else { fail("slider crop source") }
     let sx = CGFloat(bitmap.pixelsWide) / size.width
@@ -798,7 +1321,8 @@ private func verifySliderOnly(_ tag: String, reduced: Bool, opaque: Bool,
     check(window.isKeyWindow, tag + " settings accepts native keyboard events")
     let originalBounds = host.bounds
     let originalSize = panel.naturalContentSize
-    let y: CGFloat = 228
+    // 滑条到页面底部的距离固定；上方增加设置区后不再使用旧的绝对纵坐标。
+    let y: CGFloat = originalSize.height - 162.5
     let region = NSRect(x: 10, y: y - 20, width: 340, height: 40)
     func sliderAX() -> NSObject? {
         accessibilityElements(window).first {
@@ -847,6 +1371,7 @@ private func verifySliderOnly(_ tag: String, reduced: Bool, opaque: Bool,
         if element != nil {
             check(Set(axValues).count == 3, tag + " accessibility value follows 0 50 and 100 percent")
         }
+        await verifyFastSliderDrag(tag, host: host, y: y)
         let dragged = await sliderDrag(host, y: y)
         print("SLIDER-DRAG \(tag): \(dragged)")
         check(dragged.count == 5 && dragged[1] > dragged[0] && dragged[2] > dragged[1] && dragged[3] > dragged[2],
@@ -885,6 +1410,43 @@ private func verifySliderOnly(_ tag: String, reduced: Bool, opaque: Bool,
         options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent(tag + "-slider-results.json"))
 }
 
+@MainActor
+private func verifyDetailIdle(panel: PanelContentController, host: NSView, overview: CGFloat) async {
+    func expanded() -> Bool { panel.naturalContentSize.height > overview + 40 }
+    hover(host, NSPoint(x: -20, y: 390))
+    await settle(0.1)
+    click(host, NSPoint(x: 80, y: 140))
+    await settle(0.4)
+    check(expanded(), "idle expiry fixture opens CPU detail")
+    await settle(10.7)
+    check(abs(panel.naturalContentSize.height - overview) < 0.5 && !panel.isDetailAnimating,
+          "ten seconds idle automatically collapses detail through native animation")
+
+    click(host, NSPoint(x: 80, y: 140))
+    hover(host, NSPoint(x: 80, y: 140))
+    await settle(10.7)
+    check(expanded(), "hovering selected metric keeps detail open beyond idle timeout")
+    hover(host, NSPoint(x: 180, y: 397))
+    await settle(10.7)
+    check(expanded(), "hovering detail keeps reading uninterrupted beyond idle timeout")
+    hover(host, NSPoint(x: -20, y: 390))
+    await settle(8.3)
+    click(host, NSPoint(x: 255, y: 140))
+    await settle(2.7)
+    check(expanded(), "switching metric cancels old deadline and restarts a full idle period")
+
+    press("打开显示与外观设置", in: host)
+    await settle(0.4)
+    check(panel.naturalContentSize.height < overview - 40, "idle fixture navigates to settings")
+    await settle(10.7)
+    press("返回指标面板", in: host)
+    await settle(0.4)
+    check(expanded(), "settings page cancels idle task and returning preserves selected detail")
+    await settle(10.7)
+    check(abs(panel.naturalContentSize.height - overview) < 0.5 && !panel.isDetailAnimating,
+          "returning to overview restarts idle timer and restores exact collapsed geometry")
+}
+
 func runFocusedDetailChecks(completion: @escaping () -> Void) {
     Task { @MainActor in
         guard let original = class_getInstanceMethod(NSWorkspace.self, NSSelectorFromString("accessibilityDisplayShouldReduceMotion")),
@@ -897,6 +1459,24 @@ func runFocusedDetailChecks(completion: @escaping () -> Void) {
             method_exchangeImplementations(original, replacement)
             method_exchangeImplementations(originalGlass, replacementGlass)
         }
+        if CommandLine.arguments.contains("--iridescent-film-only") {
+            await verifyIridescentFilm()
+            try! JSONSerialization.data(withJSONObject: ["passedAssertions": nativeChecks.count,
+                "checks": nativeChecks], options: [.prettyPrinted, .sortedKeys])
+                .write(to: output.appendingPathComponent("iridescent-film-results.json"))
+            print("PASS: \(nativeChecks.count) focused iridescent film assertions")
+            completion()
+            return
+        }
+        if CommandLine.arguments.contains("--presentation-only") {
+            await controllerChecks()
+            try! JSONSerialization.data(withJSONObject: ["passedAssertions": nativeChecks.count,
+                "checks": nativeChecks], options: [.prettyPrinted, .sortedKeys])
+                .write(to: output.appendingPathComponent("presentation-results.json"))
+            print("PASS: \(nativeChecks.count) focused presentation assertions")
+            completion()
+            return
+        }
         for (tag, reduced, opaque) in [("detail-normal", false, false), ("detail-reduced", true, false), ("detail-opaque", true, true)] {
             probeReducedMotion = reduced
             probeReducedTransparency = opaque
@@ -905,6 +1485,16 @@ func runFocusedDetailChecks(completion: @escaping () -> Void) {
             let (panel, controller) = await hostPanel(reduced: reduced, positions: positions)
             let host = controller.view
             let overview = panel.naturalContentSize.height
+            if CommandLine.arguments.contains("--detail-idle-only") {
+                await verifyDetailIdle(panel: panel, host: host, overview: overview)
+                previewPopover.close()
+                try! JSONSerialization.data(withJSONObject: ["passedAssertions": nativeChecks.count,
+                    "checks": nativeChecks], options: [.prettyPrinted, .sortedKeys])
+                    .write(to: output.appendingPathComponent("detail-idle-results.json"))
+                print("PASS: \(nativeChecks.count) focused detail idle assertions")
+                completion()
+                return
+            }
             if CommandLine.arguments.contains("--slider-only") {
                 await verifySliderOnly(tag.replacingOccurrences(of: "detail-", with: "slider-"),
                                        reduced: reduced, opaque: opaque, panel: panel, host: host)
@@ -983,7 +1573,9 @@ func runFocusedDetailChecks(completion: @escaping () -> Void) {
                 await focusedDetailTrace(tag + "-" + name + "-open", reduced: reduced, panel: panel, host: host) { click(host, point) }
                 check(panel.naturalContentSize.height > overview + 40, tag + " " + name + " expands to actual natural detail size")
                 state(tag + "-" + name + "-expanded", panel: panel, host: host)
-                await focusedDetailTrace(tag + "-" + name + "-close", reduced: reduced, panel: panel, host: host) { click(host, NSPoint(x: 326, y: 379.5)) }
+                await focusedDetailTrace(tag + "-" + name + "-close", reduced: reduced, panel: panel, host: host) {
+                    clickActualDetailClose(tag + "-" + name, panel: panel, host: host)
+                }
                 check(abs(panel.naturalContentSize.height - overview) < 0.5, tag + " close button restores exact overview size")
             }
             click(host, cases[0].1)

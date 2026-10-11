@@ -63,15 +63,9 @@ extension RegressionTests {
               content.naturalContentSize.height == ceil(382.1 * scale) / scale,
               "panel content: accepted subpixel widths normalize and height rounds up at backing scale")
         let document = content.view.subviews.last!
-        content.setContraction(1)
-        check(abs(document.layer!.transform.m22 - 0.94) < 0.00001 && host.view.frame.size == content.naturalContentSize,
-              "panel content: closing shrinks only document drawing while preserving host layout")
-        content.setContraction(-1)
-        check(document.layer!.transform.m22 == 1, "panel content: negative contraction clamps to natural vertical scale")
-        content.setContraction(2)
-        check(abs(document.layer!.transform.m22 - 0.94) < 0.00001, "panel content: overrange contraction clamps to six-percent vertical shrink")
-        content.setContraction(0)
-        check(document.layer!.transform.m22 == 1, "panel content: contraction clears on restore")
+        check(CATransform3DIsIdentity(document.layer!.transform) &&
+              host.view.frame.size == content.naturalContentSize,
+              "panel content: document drawing remains untransformed at its natural host size")
 
         let relay = PanelContentMeasurement()
         relay.receive(NSSize(width: 360, height: 382.5))

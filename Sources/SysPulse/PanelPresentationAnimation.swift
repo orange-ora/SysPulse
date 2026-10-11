@@ -121,7 +121,6 @@ final class PanelPresentationAnimation {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         window.setFrame(frame, display: false)
-        contentController?.setContraction(contraction)
         // 仅首尾约两三帧衔接可见性；大部分下拉 / 回收保持完全可见。
         window.alphaValue = originalAlpha * min(max(progress / 0.10, 0), 1)
         CATransaction.commit()
@@ -132,8 +131,9 @@ final class PanelPresentationAnimation {
         // 使用即将显示的时刻，不拿上一帧时间计算下一帧的位置。
         let timestamp = max(link.targetTimestamp, link.timestamp)
         let t = CGFloat(min(max((timestamp - startTimestamp) / duration, 0), 1))
-        // 平滑加速 / 减速降低 60 Hz 下入口的大跨度，终点速度为零。
-        let eased = t * t * (3 - 2 * t)
+        // 从收起端打开时立即推进，避免缓入和透明度叠加成等待感；关闭与反向仍平滑衔接。
+        let isInitialOpening = sourceProgress <= 0.001 && targetProgress == 1
+        let eased = isInitialOpening ? 1 - (1 - t) * (1 - t) : t * t * (3 - 2 * t)
         apply(progress: t >= 1 ? targetProgress : sourceProgress + (targetProgress - sourceProgress) * eased,
               contraction: t >= 1 ? targetContraction : sourceContraction + (targetContraction - sourceContraction) * eased)
         guard self.link === link else { return }
@@ -158,7 +158,6 @@ final class PanelPresentationAnimation {
         CATransaction.setDisableActions(true)
         popover?.contentSize = restingContentSize
         window?.setFrame(restingFrame, display: false)
-        contentController?.setContraction(0)
         contraction = 0
         window?.alphaValue = originalAlpha
         CATransaction.commit()
@@ -311,8 +310,6 @@ final class PanelContentController: NSViewController {
 
     func suspendSizeUpdates() { sizeUpdatesSuspended = true }
 
-    func setContraction(_ amount: CGFloat) { viewport.setContraction(amount) }
-
     func restoreSizeUpdates() {
         sizeUpdatesSuspended = false
         detailAnimation?.resumeAfterPresentation()
@@ -355,7 +352,6 @@ final class PanelContentController: NSViewController {
         private weak var surface: NSView?
         private let documentView = NSView(frame: .zero)
         private var documentSize = NSSize.zero
-        private var contraction: CGFloat = 0
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -379,11 +375,6 @@ final class PanelContentController: NSViewController {
             addSubview(surface)
             addSubview(documentView)
             documentView.addSubview(view)
-            pinDocumentTop()
-        }
-
-        func setContraction(_ amount: CGFloat) {
-            contraction = min(max(amount, 0), 1)
             pinDocumentTop()
         }
 
@@ -424,12 +415,7 @@ final class PanelContentController: NSViewController {
             documentView.layer?.transform = CATransform3DIdentity
             if documentView.frame != frame { documentView.frame = frame }
             if body.frame != documentView.bounds { body.frame = documentView.bounds }
-            let scaleX = contraction > 0 ? min(1, max(safe.width, 1) / documentSize.width) : 1
-            let scaleY = 1 - 0.06 * contraction
-            var transform = CATransform3DMakeScale(scaleX, scaleY, 1)
-            // 内容缩小仍贴齐上沿；辅助容器承载变换，不改写 SwiftUI 的布局尺寸。
-            transform.m42 = (isFlipped ? -1 : 1) * documentSize.height * (1 - scaleY) / 2
-            documentView.layer?.transform = transform
+            // 回收只移动并裁切可见窗口；正文保持自然尺寸和上沿位置。
             CATransaction.commit()
         }
     }

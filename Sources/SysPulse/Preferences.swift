@@ -2,23 +2,19 @@ import AppKit
 import Combine
 import Foundation
 
-/// 菜单栏光效互斥；流光与光晕绘制背景，炫彩只作用于字形。
+/// 菜单栏背景互斥：无背景、流光、光晕与通透液态玻璃。
 enum MenuBarEffect: String, CaseIterable {
-    /// 无光效：只有指标文字，没有背景动效（零持续重画开销）
     case off
-    /// 流光：规则的正弦色带横向流动（2026-09-16 的原始效果）
     case glow
-    /// 光晕：多个径向光斑各自独立游走、互相叠加，无固定方向
     case diffuse
-    /// 炫彩：原生玻璃上的冷色字面与增强珠光扫动
     case iridescent
 
     var title: String {
         switch self {
-        case .off: return "无光效"
+        case .off: return "无背景"
         case .glow: return "流光"
         case .diffuse: return "光晕"
-        case .iridescent: return "炫彩"
+        case .iridescent: return "星点"
         }
     }
 }
@@ -68,11 +64,10 @@ final class Preferences: ObservableObject {
         }
     }
 
-    /// 菜单栏光效（无光效 / 流光 / 光晕 / 炫彩）；旧 off / glow / diffuse 存值继续兼容。
+    /// 独立保存每一种菜单栏背景选择。
     @Published var menuBarEffect: MenuBarEffect {
         didSet { store(menuBarEffect.rawValue, Keys.menuBarEffect) }
     }
-
 
     @Published var menuBarLayout: MenuBarLayout {
         didSet { store(menuBarLayout.rawValue, Keys.menuBarLayout) }
@@ -106,9 +101,9 @@ final class Preferences: ObservableObject {
         // ⚠️ 不能用 `register(defaults:)` 里的值来判断"用户设过没有"：注册的默认值
         // 不会被 `object(forKey:)` 当作真实存值返回（它只返回真正写过的值）。
         // 所以靠下面两个判断区分三种情况：
-        //   · 旧 key 存过 → 按旧值迁移（老用户，别把他的流光弄丢）
+        //   · 旧 key 存过 → 保留流光或关闭的选择
         //   · 旧 key 没存过、新 key 存过 → 用新值（已经在新版本上设过）
-        //   · 两个都没存过 → 全新用户，使用当前确认的默认光效（光晕）
+        //   · 两个都没存过 → 全新用户，使用当前确认的光晕默认背景
         //
         // ⚠️⚠️ **`didSet` 在 `init` 里不会触发**，所以这里对 `menuBarEffect` 的赋值
         // **不会**自动落盘。凡是"要持久化的迁移结果"都必须显式调 `store(...)` ——

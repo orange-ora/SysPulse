@@ -33,6 +33,6 @@ swiftc -O -swift-version 5 -target "$TEST_TARGET" -warnings-as-errors -module-ca
     -o "$TEST_BUILD/RegressionTests"
 
 "$TEST_BUILD/RegressionTests" "$@"
-if [[ "${1:-}" == "--metric-colors-only" ]]; then exit 0; fi
+if [[ "${1:-}" == "--metric-colors-only" || "${1:-}" == "--menu-effects-only" ]]; then exit 0; fi
 python3 "$PROJECT_ROOT/Tools/Regression/ControllerStateTests.py" "$TEST_BUILD/controller"
 python3 "$PROJECT_ROOT/Tools/Regression/PresentationStateTests.py" "$TEST_BUILD/presentation"

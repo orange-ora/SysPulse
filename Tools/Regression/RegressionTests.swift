@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import ImageIO
 import ServiceManagement
 import SwiftUI
 
@@ -145,8 +146,8 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
                       "memory rendering \(name.rawValue)/\(density): pressure changes preserve layout geometry")
                 let rainbowNormal = image(0.99, .normal, density, appearance, effect: .iridescent)
                 let rainbowCritical = image(0.99, .critical, density, appearance, effect: .iridescent)
-                check(bytes(rainbowNormal) == bytes(rainbowCritical),
-                      "memory rendering \(name.rawValue)/\(density): iridescent retains its chosen cold colors")
+                check(rainbowNormal.size == rainbowCritical.size && bytes(rainbowNormal) != bytes(rainbowCritical),
+                      "memory rendering \(name.rawValue)/\(density): star glass preserves geometry and system pressure warning colors")
             }
         }
         snapshot.memoryPressure = .critical
@@ -448,7 +449,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         check(!custom.showNetwork && !custom.showCPU && !custom.showGPU && !custom.showMemory &&
               custom.refreshInterval == 5 && close(custom.panelTransparency, 0.52) &&
               custom.menuBarLayout == .compact && custom.menuBarEffect == .glow,
-              "display preferences: existing valid custom display settings remain unchanged")
+              "display preferences: existing glow and other custom display settings remain unchanged")
         // 原有范围内的存值与新增高通透值都应原样持久化、重载。
         for value in [0.30, 0.52, 0.70, 0.95, 1.0] {
             prefs.panelTransparency = value
@@ -458,9 +459,20 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
                   "display preferences: transparency \(value) persists and reloads")
         }
         check(MenuBarEffect.allCases.map { $0.rawValue } == ["off", "glow", "diffuse", "iridescent"],
-              "display preferences: effect raw values retain stored compatibility")
-        check(MenuBarEffect.allCases.map { $0.title } == ["无光效", "流光", "光晕", "炫彩"],
-              "display preferences: effect titles match current UI labels")
+              "display preferences: all four background choices retain independent stored IDs")
+        check(MenuBarEffect.allCases.map { $0.title } == ["无背景", "流光", "光晕", "星点"],
+              "display preferences: existing backgrounds remain available alongside liquid glass")
+        for effect in [MenuBarEffect.off, .glow, .diffuse, .iridescent] {
+            defaults.set(effect.rawValue, forKey: Preferences.Keys.menuBarEffect)
+            let reloaded = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
+            check(reloaded.menuBarEffect == effect &&
+                  defaults.string(forKey: Preferences.Keys.menuBarEffect) == effect.rawValue,
+                  "display preferences: stored \(effect.rawValue) reloads without changing the selected background")
+            prefs.menuBarEffect = effect
+            check(prefs.menuBarEffect == effect &&
+                  defaults.string(forKey: Preferences.Keys.menuBarEffect) == effect.rawValue,
+                  "display preferences: assigning \(effect.rawValue) preserves and stores that independent choice")
+        }
         prefs.menuBarEffect = .iridescent
         let iridescent = Preferences(defaults: UserDefaults(suiteName: suiteName)!)
         check(defaults.string(forKey: Preferences.Keys.menuBarEffect) == "iridescent" &&
@@ -588,39 +600,8 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         ProcessFixture.fail = false
     }
 
-    static func pixels(_ elapsed: Double, effect: MenuBarEffect = .glow) -> [UInt8] {
-        let w = 215, h = 19
-        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
-                                  bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                  isPlanar: false, colorSpaceName: .deviceRGB,
-                                  bytesPerRow: w * 4, bitsPerPixel: 32)!
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)!
-        NSColor.white.setFill()
-        NSRect(x: 0, y: 0, width: w, height: h).fill()
-        MenuBarImage.drawEffect(size: NSSize(width: w, height: h), effect: effect, elapsed: elapsed)
-        NSGraphicsContext.current?.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
-        return Array(UnsafeBufferPointer(start: rep.bitmapData!, count: w * h * 4))
-    }
-    static func distance(_ a: [UInt8], _ b: [UInt8]) -> Double {
-        var sum = 0.0
-        for i in a.indices where i % 4 != 3 { sum += abs(Double(a[i]) - Double(b[i])) }
-        return sum / Double(a.count / 4 * 3) / 255
-    }
-    static func glow() {
-        let seam = distance(pixels(11.999999), pixels(12))
-        check(seam < 0.001, "glow: infinitesimal 12s boundary color change is continuous (\(seam))")
-        let normal = distance(pixels(11.8), pixels(11.9))
-        let boundary = distance(pixels(11.9), pixels(12))
-        check(boundary < 0.03 && boundary < max(normal * 3, 0.01),
-              "glow: regular frame across boundary has no large color jump")
-        let later = distance(pixels(23.999999), pixels(24))
-        check(later < 0.001, "glow: subsequent cycle boundary is also continuous")
-    }
-
-    static func iridescent() {
-        let suite = "SysPulse.Regression.Iridescent.\(UUID().uuidString)"
+    static func starGlass() {
+        let suite = "SysPulse.Regression.StarGlass.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = Preferences(defaults: defaults)
@@ -630,7 +611,13 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         snapshot.memoryFraction = 0.61
         snapshot.downSpeed = 2_400_000
         snapshot.upSpeed = 320_000
-        func raster(_ image: NSImage, background: NSColor = .clear) -> [UInt8] {
+        let previewDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/star-glass-preview", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: previewDirectory, withIntermediateDirectories: true) }
+        catch { fatalError("Cannot create star glass preview directory: \(error)") }
+
+        func bitmap(_ image: NSImage, background: NSColor = .clear) -> NSBitmapImageRep {
             let w = Int(image.size.width * 2), h = Int(image.size.height * 2)
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
                                       bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -645,60 +632,368 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
             image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
             NSGraphicsContext.current?.flushGraphics()
             NSGraphicsContext.restoreGraphicsState()
-            return Array(UnsafeBufferPointer(start: rep.bitmapData!, count: w * h * 4))
+            return rep
         }
-        for name in [NSAppearance.Name.aqua, .darkAqua] {
-            for density in [MenuBarDensity.full, .compact, .minimal] {
-                func image(_ elapsed: Double?) -> NSImage {
-                    MenuBarImage.render(snapshot: snapshot, preferences: preferences,
-                        appearance: NSAppearance(named: name), density: density,
-                        effect: .iridescent, effectElapsed: elapsed)!
+        func raster(_ image: NSImage, background: NSColor = .clear) -> [UInt8] {
+            let rep = bitmap(image, background: background)
+            return Array(UnsafeBufferPointer(start: rep.bitmapData!, count: rep.bytesPerRow * rep.pixelsHigh))
+        }
+        func maxDifference(_ a: [UInt8], _ b: [UInt8]) -> Int {
+            guard a.count == b.count else { return 255 }
+            return zip(a, b).reduce(0) { max($0, abs(Int($1.0) - Int($1.1))) }
+        }
+        func luminance(_ pixels: [UInt8], at offset: Int) -> Double {
+            func linear(_ byte: UInt8) -> Double {
+                let value = Double(byte) / 255
+                return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(pixels[offset]) + 0.7152 * linear(pixels[offset + 1]) +
+                0.0722 * linear(pixels[offset + 2])
+        }
+        func export(_ image: NSImage, name: String, background: NSColor) {
+            guard let png = bitmap(image, background: background).representation(using: .png, properties: [:]) else {
+                fatalError("Cannot encode star glass preview \(name)")
+            }
+            do { try png.write(to: previewDirectory.appendingPathComponent(name + ".png")) }
+            catch { fatalError("Cannot write star glass preview \(name): \(error)") }
+        }
+        func exportAnimation(name: String, background: NSColor, render: (Double) -> NSImage) {
+            let url = previewDirectory.appendingPathComponent(name + ".gif")
+            guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "com.compuserve.gif" as CFString, 120, nil) else {
+                fatalError("Cannot create drifting star preview \(name)")
+            }
+            CGImageDestinationSetProperties(destination, [kCGImagePropertyGIFDictionary:
+                [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
+            let properties = [kCGImagePropertyGIFDictionary:
+                [kCGImagePropertyGIFDelayTime: 0.1, kCGImagePropertyGIFUnclampedDelayTime: 0.1]] as CFDictionary
+            for frame in 0..<120 {
+                guard let cgImage = bitmap(render(Double(frame) / 10), background: background).cgImage else {
+                    fatalError("Cannot rasterize drifting star preview \(name), frame \(frame)")
                 }
-                let firstImage = image(0), movingImage = image(3), nextImage = image(5)
-                let first = raster(firstImage), moving = raster(movingImage), next = raster(nextImage)
+                CGImageDestinationAddImage(destination, cgImage, properties)
+            }
+            guard CGImageDestinationFinalize(destination) else { fatalError("Cannot finish drifting star preview \(name)") }
+        }
+        let times: [Double?] = [0, 0.1, 1, 5, 18, 100, -18, Double.greatestFiniteMagnitude,
+                                nil, .nan, .infinity, -.infinity]
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let dark = name == .darkAqua
+            let appearance = NSAppearance(named: name)!
+            let backdrop = NSColor(calibratedWhite: dark ? 0.12 : 0.93, alpha: 1)
+            for density in [MenuBarDensity.full, .compact, .minimal] {
+                func image(_ elapsed: Double?, includesBackground: Bool = true,
+                           effect: MenuBarEffect = .iridescent) -> NSImage {
+                    MenuBarImage.render(snapshot: snapshot, preferences: preferences,
+                                        appearance: appearance, density: density, effect: effect,
+                                        effectElapsed: elapsed, includesBackground: includesBackground)!
+                }
+                let foreground = image(0, includesBackground: false)
+                let glyphs = raster(foreground)
                 let label = "\(name.rawValue)/\(density)"
-                let width = Int(firstImage.size.width * 2), height = Int(firstImage.size.height * 2)
-                var occupied = 0, colorful = 0, warm = 0, animated = 0
-                var stableAlpha = true, transparentEdges = true
-                for y in 0..<height {
-                    for x in 0..<width {
-                        let offset = (y * width + x) * 4
-                        let alpha = first[offset + 3]
-                        if alpha > 0 { occupied += 1 }
-                        stableAlpha = stableAlpha && alpha == moving[offset + 3]
-                        if x < 2 || x >= width - 2 {
-                            transparentEdges = transparentEdges && alpha == 0 && moving[offset + 3] == 0
+                let width = Int(foreground.size.width * 2), height = Int(foreground.size.height * 2)
+                let pixelCount = width * height
+                let occupiedGlyphs = stride(from: 0, to: glyphs.count, by: 4).filter { glyphs[$0 + 3] > 0 }
+                let coreGlyphs = occupiedGlyphs.filter { glyphs[$0 + 3] >= 200 }
+                check(occupiedGlyphs.count > 20 && occupiedGlyphs.count < pixelCount / 2 && coreGlyphs.count > 20,
+                      "star glass \(label): adaptive foreground retains solid readable strokes and transparent blank space")
+                check(times.allSatisfy { raster(image($0, includesBackground: false)) == glyphs },
+                      "star glass \(label): foreground pixels stay identical for all finite, absent and nonfinite times")
+                let textOnBackdrop = raster(foreground, background: backdrop)
+                let emptyOnBackdrop = raster(NSImage(size: foreground.size), background: backdrop)
+                let plainContrast = coreGlyphs.reduce(0.0) { sum, offset in
+                    let a = luminance(textOnBackdrop, at: offset), b = luminance(emptyOnBackdrop, at: offset)
+                    return sum + (max(a, b) + 0.05) / (min(a, b) + 0.05)
+                } / Double(coreGlyphs.count)
+                check(plainContrast >= 4.5,
+                      "star glass \(label): adaptive foreground retains matching-backdrop core-stroke contrast")
+                guard let glass = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                    effect: .iridescent, elapsed: 0, foreground: foreground),
+                      let liquid = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                    effect: .iridescent, elapsed: 0, foreground: foreground, includesStars: false),
+                      let pureWater = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                    effect: .iridescent, elapsed: 0, foreground: foreground, includesStars: false, includesSilks: false)
+                else { fatalError("star glass \(label): background unavailable") }
+                // Keep silk in the particle baseline so long strands never count as stars.
+                let glassPixels = raster(glass), liquidPixels = raster(liquid), waterPixels = raster(pureWater)
+                let occupied = stride(from: 0, to: glassPixels.count, by: 4).filter { glassPixels[$0 + 3] > 0 }
+                let corners = [0, width - 1, (height - 1) * width, height * width - 1]
+                check(glass.size == foreground.size && occupied.count > pixelCount / 2 &&
+                      occupied.filter { glassPixels[$0 + 3] < 250 }.count > occupied.count * 9 / 10 &&
+                      corners.allSatisfy { glassPixels[$0 * 4 + 3] == 0 },
+                      "star glass \(label): liquid fills a translucent capsule with clear rounded corners")
+                var colorful = 0, warmLiquid = 0
+                var lows = [Double](repeating: 1, count: 3), highs = [Double](repeating: 0, count: 3)
+                for offset in stride(from: 0, to: waterPixels.count, by: 4) where waterPixels[offset + 3] > 30 {
+                    let alpha = Double(waterPixels[offset + 3])
+                    let channels = (0..<3).map { Double(waterPixels[offset + $0]) / alpha }
+                    let spread = channels.max()! - channels.min()!
+                    if spread > 0.10 { colorful += 1 }
+                    if spread > 0.10 && channels[0] > channels[2] + 0.03 { warmLiquid += 1 }
+                    for channel in 0..<3 {
+                        lows[channel] = min(lows[channel], channels[channel])
+                        highs[channel] = max(highs[channel], channels[channel])
+                    }
+                }
+                check(colorful > occupied.count / 4 && warmLiquid == 0 &&
+                      zip(lows, highs).contains { $1 - $0 > 0.04 },
+                      "star glass \(label): liquid retains a clean cool-water color and depth without a warm wash")
+                // Inspect actual unmasked output: text legitimately cuts strands into short pieces.
+                let unmaskedWater = raster(MenuBarImage.background(size: foreground.size, appearance: appearance,
+                    effect: .iridescent, elapsed: 0, includesStars: false, includesSilks: false)!)
+                let unmaskedSilks = raster(MenuBarImage.background(size: foreground.size, appearance: appearance,
+                    effect: .iridescent, elapsed: 0, includesStars: false)!)
+                var silkPixels = Set<Int>(), goldSilk = 0, coloredSilk = 0
+                for pixel in 0..<pixelCount {
+                    let offset = pixel * 4
+                    let change = (0..<4).map { abs(Int(unmaskedSilks[offset + $0]) - Int(unmaskedWater[offset + $0])) }.max()!
+                    if change > 3 { silkPixels.insert(pixel) }
+                    let baseAlpha = Double(unmaskedWater[offset + 3]) / 255
+                    let alpha = (Double(unmaskedSilks[offset + 3]) / 255 - baseAlpha) / max(0.001, 1 - baseAlpha)
+                    if alpha > 0.04 {
+                        let tint = (0..<3).map { channel in
+                            (Double(unmaskedSilks[offset + channel]) / 255 -
+                             Double(unmaskedWater[offset + channel]) / 255 * (1 - alpha)) / alpha
                         }
-                        if alpha > 160 {
-                            let red = Int(first[offset]), green = Int(first[offset + 1]), blue = Int(first[offset + 2])
-                            if max(red, green, blue) - min(red, green, blue) > 15 { colorful += 1 }
-                            if red > green + 2 && red > blue + 2 { warm += 1 }
-                            let change = (0..<3).reduce(0) { $0 + abs(Int(first[offset + $1]) - Int(moving[offset + $1])) }
-                            if change > 15 { animated += 1 }
+                        if tint[0] > 0.80 && tint[1] > 0.60 && tint[2] < 0.70 { goldSilk += 1 }
+                        if tint[2] > tint[0] + 0.15 ||
+                           (tint[0] > tint[1] + 0.15 && tint[2] > tint[1] + 0.10) { coloredSilk += 1 }
+                    }
+                }
+                var silkUnseen = silkPixels, strandBounds: [(Int, Int)] = []
+                while let first = silkUnseen.first {
+                    silkUnseen.remove(first)
+                    var queue = [first], index = 0
+                    while index < queue.count {
+                        let pixel = queue[index], x = pixel % width, y = pixel / width
+                        index += 1
+                        for dy in -1...1 {
+                            for dx in -1...1 where dx != 0 || dy != 0 {
+                                let nx = x + dx, ny = y + dy
+                                if nx >= 0 && nx < width && ny >= 0 && ny < height {
+                                    let neighbor = ny * width + nx
+                                    if silkUnseen.remove(neighbor) != nil { queue.append(neighbor) }
+                                }
+                            }
+                        }
+                    }
+                    let xs = queue.map { $0 % width }, ys = queue.map { $0 / width }
+                    strandBounds.append((xs.max()! - xs.min()! + 1, ys.max()! - ys.min()! + 1))
+                }
+                let elongatedBounds = strandBounds.filter { $0.0 >= width / 12 && $0.0 >= $0.1 * 4 }
+                // Neighboring colors can meet after relocation; connected-region count is not strand count.
+                let elongatedSpan = elongatedBounds.reduce(0) { $0 + $1.0 }
+                print("SILK PIXELS \(label): changed=\(silkPixels.count), gold=\(goldSilk), colored=\(coloredSilk), elongated=\(elongatedBounds.count), span=\(elongatedSpan), bounds=\(strandBounds)")
+                check(silkPixels.count > 20 && elongatedSpan >= width / 2 && goldSilk > 2 && coloredSilk > 2,
+                      "star glass \(label): silk-only output adds actual slender gold and colored strands to pure water")
+                let waterAlpha = stride(from: 3, to: waterPixels.count, by: 4).map { Int(waterPixels[$0]) }
+                check(waterPixels == unmaskedWater && waterAlpha.max()! <= (dark ? 57 : 46),
+                      "star glass \(label): isolated water keeps its low opacity and is not cut by the decoration mask")
+                for stars in [false, true] {
+                    for silks in [false, true] {
+                        let selected = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                            effect: .iridescent, elapsed: 0, foreground: foreground,
+                            includesStars: stars, includesSilks: silks)!
+                        let direct = NSImage(size: foreground.size, flipped: false) { _ in
+                            MenuBarImage.drawEffect(size: foreground.size, appearance: appearance,
+                                effect: .iridescent, elapsed: 0, foreground: foreground,
+                                includesStars: stars, includesSilks: silks)
+                            return true
+                        }
+                        check(raster(selected) == raster(direct),
+                              "star glass \(label): independent stars=\(stars) silks=\(silks) switches match direct drawing")
+                    }
+                }
+                let composite = image(0)
+                let manual = NSImage(size: foreground.size, flipped: false) { _ in
+                    let rect = NSRect(origin: .zero, size: foreground.size)
+                    glass.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                    foreground.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                    return true
+                }
+                check(composite.size == foreground.size && maxDifference(raster(composite), raster(manual)) <= 3,
+                      "star glass \(label): default rendering matches masked stars followed by stable foreground")
+                let composed = raster(composite, background: backdrop), surface = raster(glass, background: backdrop)
+                let contrast = coreGlyphs.reduce(0.0) { sum, offset in
+                    let a = luminance(composed, at: offset), b = luminance(surface, at: offset)
+                    return sum + (max(a, b) + 0.05) / (min(a, b) + 0.05)
+                } / Double(coreGlyphs.count)
+                print("STAR GLASS CONTRAST \(label): mean=\(contrast)")
+                check(contrast >= 3, "star glass \(label): foreground remains readable over liquid and stars")
+                check(times.allSatisfy { elapsed in
+                    let background = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: .iridescent, elapsed: elapsed, foreground: foreground, includesStars: false)!
+                    return raster(background) == liquidPixels
+                }, "star glass \(label): silk-only water retains exact color and transparency at every time without flashes or moving strands")
+                check(times.allSatisfy { elapsed in
+                    let background = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: .iridescent, elapsed: elapsed, foreground: foreground,
+                        includesStars: false, includesSilks: false)!
+                    return raster(background) == waterPixels
+                }, "star glass \(label): pure water remains exactly time-invariant independently of both decorations")
+                let invalidTimes: [Double?] = [nil, .nan, .infinity, -.infinity]
+                check(invalidTimes.allSatisfy { elapsed in
+                    let background = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: .iridescent, elapsed: elapsed, foreground: foreground)!
+                    return raster(image(elapsed)) == raster(composite) && raster(background) == glassPixels
+                }, "star glass \(label): absent and nonfinite particle times normalize to the valid time-zero rendering")
+                let driftTimes = [5.0, 10.0, 17.0]
+                check(driftTimes.allSatisfy { elapsed in
+                    let pixels = raster(MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: .iridescent, elapsed: elapsed, foreground: foreground)!)
+                    let changed = (0..<pixelCount).filter { pixel in
+                        (0..<3).contains { abs(Int(pixels[pixel * 4 + $0]) - Int(glassPixels[pixel * 4 + $0])) > 5 }
+                    }.count
+                    return image(elapsed).size == composite.size && changed > 10
+                }, "star glass \(label): fine stars change actual rendered positions over seconds while geometry stays fixed")
+                var independentBackgrounds: [[UInt8]] = []
+                for effect in [MenuBarEffect.glow, .diffuse] {
+                    let first = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: effect, elapsed: 0, foreground: foreground)!
+                    let later = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: effect, elapsed: 5, foreground: foreground)!
+                    let firstPixels = raster(first), laterPixels = raster(later)
+                    independentBackgrounds.append(firstPixels)
+                    let changed = (0..<pixelCount).filter { pixel in
+                        (0..<3).contains { abs(Int(firstPixels[pixel * 4 + $0]) - Int(laterPixels[pixel * 4 + $0])) > 5 }
+                    }.count
+                    check(first.size == foreground.size && later.size == foreground.size && changed > pixelCount / 100,
+                          "background \(label)/\(effect.rawValue): its own animation changes a meaningful area without changing geometry")
+                    check(maxDifference(firstPixels, glassPixels) > 10,
+                          "background \(label)/\(effect.rawValue): restored mode has distinct pixels from liquid star glass")
+                    check(raster(image(0, includesBackground: false, effect: effect)) == glyphs &&
+                          raster(image(5, includesBackground: false, effect: effect)) == glyphs,
+                          "background \(label)/\(effect.rawValue): foreground keeps the same cacheable pixels across mode and time")
+                    let direct = NSImage(size: foreground.size, flipped: false) { _ in
+                        MenuBarImage.drawEffect(size: foreground.size, appearance: appearance,
+                            effect: effect, elapsed: 0, foreground: foreground)
+                        return true
+                    }
+                    check(raster(direct) == firstPixels,
+                          "background \(label)/\(effect.rawValue): direct drawing and background API produce the same geometry and pixels")
+                    let composedMode = NSImage(size: foreground.size, flipped: false) { _ in
+                        let rect = NSRect(origin: .zero, size: foreground.size)
+                        first.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                        foreground.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                        return true
+                    }
+                    check(maxDifference(raster(image(0, effect: effect)), raster(composedMode)) <= 3,
+                          "background \(label)/\(effect.rawValue): default rendering composes its independent background below ordinary text")
+                }
+                check(maxDifference(independentBackgrounds[0], independentBackgrounds[1]) > 10,
+                      "background \(label): glow and diffuse remain visually distinct from one another")
+                check(MenuBarImage.background(size: foreground.size, appearance: appearance,
+                                             effect: .off, elapsed: 0, foreground: foreground) == nil &&
+                      raster(image(0, effect: .off)) == glyphs,
+                      "star glass \(label): off preserves foreground and removes the glass background")
+
+                // Independently dilate the actual 2x glyph coverage by a one-point round guard.
+                // The comparison isolates stars; no production mask or star geometry is reused.
+                var protectedPixels = Set<Int>()
+                for offset in occupiedGlyphs where glyphs[offset + 3] > 12 {
+                    let pixel = offset / 4, x = pixel % width, y = pixel / width
+                    for dy in -2...2 {
+                        for dx in -2...2 where dx * dx + dy * dy <= 4 {
+                            let nx = x + dx, ny = y + dy
+                            if nx >= 0 && nx < width && ny >= 0 && ny < height { protectedPixels.insert(ny * width + nx) }
                         }
                     }
                 }
-                check(occupied > 0 && occupied < width * height / 2 && transparentEdges,
-                      "iridescent \(label): only glyphs have alpha, surrounding blank space stays transparent")
-                check(colorful > 20 && warm == 0,
-                      "iridescent \(label): glyph colors remain blue/cyan/violet with no warm red or orange dominance")
-                check(animated > 5 && stableAlpha,
-                      "iridescent \(label): local pearl shine moves while the glyph alpha mask remains unchanged")
-                check(firstImage.size == movingImage.size && firstImage.size == nextImage.size &&
-                      distance(first, next) < 0.001 && distance(raster(image(4.999999)), next) < 0.001,
-                      "iridescent \(label): image size and five-second boundary remain stable")
-                check(distance(first, raster(image(nil))) < 0.001 && distance(first, raster(image(.infinity))) < 0.001,
-                      "iridescent \(label): absent or nonfinite phase draws a valid static glyph effect")
-                let background = NSColor(calibratedRed: 0.2, green: 0.1, blue: 0.3, alpha: 1)
-                let composited = raster(movingImage, background: background)
-                let reference = raster(NSImage(size: firstImage.size), background: background)
-                let untouched = stride(from: 0, to: first.count, by: 4).allSatisfy { offset in
-                    guard first[offset + 3] == 0 else { return true }
-                    return Array(composited[offset..<(offset + 4)]) == Array(reference[offset..<(offset + 4)])
+                func delta(_ a: [UInt8], _ b: [UInt8], _ pixel: Int) -> Int {
+                    (0..<4).map { abs(Int(a[pixel * 4 + $0]) - Int(b[pixel * 4 + $0])) }.max()!
                 }
-                check(untouched, "iridescent \(label): isolated sourceIn leaves the existing destination unchanged outside glyphs")
+                let silkLeakage = protectedPixels.map { delta(liquidPixels, waterPixels, $0) }.max() ?? 0
+                let removedSilks = protectedPixels.filter { delta(unmaskedSilks, unmaskedWater, $0) > 3 }.count
+                let visibleSilks = (0..<pixelCount).filter { delta(liquidPixels, waterPixels, $0) > 3 }.count
+                print("SILK MASK \(label): leakage=\(silkLeakage), removed=\(removedSilks), visible=\(visibleSilks)")
+                check(silkLeakage == 0 && visibleSilks > 20,
+                      "star glass \(label): actual visible silk leaves the independent one-point glyph guard unchanged")
+                for elapsed in [0.0, 5.0, 10.0, 17.0] {
+                    let current = MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: .iridescent, elapsed: elapsed, foreground: foreground)!
+                    let currentPixels = raster(current)
+                    let unguarded = raster(MenuBarImage.background(size: foreground.size, appearance: appearance,
+                        effect: .iridescent, elapsed: elapsed)!)
+                    let leakage = protectedPixels.map { delta(currentPixels, liquidPixels, $0) }.max() ?? 0
+                    let removedCandidates = protectedPixels.filter { delta(unguarded, unmaskedSilks, $0) > 3 }.count
+                    let combinedLeakage = protectedPixels.map { delta(currentPixels, waterPixels, $0) }.max() ?? 0
+                    print("STAR MASK \(label) time \(elapsed): guarded=\(protectedPixels.count), leakage=\(leakage), combinedLeakage=\(combinedLeakage), removed=\(removedCandidates)")
+                    check(combinedLeakage == 0,
+                          "star glass \(label) time \(elapsed): combined silk and stars leave pure-water RGBA exactly unchanged under the glyph guard")
+                    check(leakage <= 3,
+                          "star glass \(label) time \(elapsed): drifting stars leave one-point padded glyph coverage unchanged")
+                    check(removedCandidates > 5 && maxDifference(currentPixels, unguarded) > 3,
+                          "star glass \(label) time \(elapsed): glyph guard removes actual overlapping particle candidates")
+                    let composed = raster(image(elapsed), background: backdrop)
+                    let surface = raster(current, background: backdrop)
+                    let mean = coreGlyphs.reduce(0.0) { sum, offset in
+                        let a = luminance(composed, at: offset), b = luminance(surface, at: offset)
+                        return sum + (max(a, b) + 0.05) / (min(a, b) + 0.05)
+                    } / Double(coreGlyphs.count)
+                    check(mean >= 3,
+                          "star glass \(label) time \(elapsed): drifting star positions preserve foreground contrast")
+                    let manualPhase = NSImage(size: foreground.size, flipped: false) { _ in
+                        let rect = NSRect(origin: .zero, size: foreground.size)
+                        current.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                        foreground.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                        return true
+                    }
+                    check(maxDifference(raster(image(elapsed)), raster(manualPhase)) <= 3,
+                          "star glass \(label) time \(elapsed): default composition uses the same moving guarded stars")
+                }
+                let liquidOnBackdrop = raster(liquid, background: backdrop)
+                var starPixels = Set<Int>(), golden = 0, silver = 0
+                for pixel in 0..<pixelCount {
+                    let offset = pixel * 4
+                    let gains = (0..<3).map { Int(surface[offset + $0]) - Int(liquidOnBackdrop[offset + $0]) }
+                    if gains.max()! > 3 && luminance(surface, at: offset) > luminance(liquidOnBackdrop, at: offset) + 0.001 {
+                        starPixels.insert(pixel)
+                        let baseAlpha = Double(liquidPixels[offset + 3]) / 255
+                        let combinedAlpha = Double(glassPixels[offset + 3]) / 255
+                        let particleAlpha = (combinedAlpha - baseAlpha) / max(0.001, 1 - baseAlpha)
+                        if particleAlpha > 0.04 {
+                            let tint = (0..<3).map { channel in
+                                (Double(glassPixels[offset + channel]) / 255 -
+                                 Double(liquidPixels[offset + channel]) / 255 * (1 - particleAlpha)) / particleAlpha
+                            }
+                            if tint[0] > 0.80 && tint[1] > 0.60 && tint[2] < 0.70 { golden += 1 }
+                            if tint.min()! > 0.80 && tint.max()! - tint.min()! < 0.18 { silver += 1 }
+                        }
+                    }
+                }
+                var unseen = starPixels, sizes: [Int] = []
+                while let first = unseen.first {
+                    unseen.remove(first)
+                    var queue = [first], index = 0
+                    while index < queue.count {
+                        let pixel = queue[index], x = pixel % width, y = pixel / width
+                        index += 1
+                        for dy in -1...1 {
+                            for dx in -1...1 where dx != 0 || dy != 0 {
+                                let nx = x + dx, ny = y + dy
+                                if nx >= 0 && nx < width && ny >= 0 && ny < height {
+                                    let neighbor = ny * width + nx
+                                    if unseen.remove(neighbor) != nil { queue.append(neighbor) }
+                                }
+                            }
+                        }
+                    }
+                    sizes.append(queue.count)
+                }
+                let fine = sizes.filter { $0 <= 16 }.count
+                print("STAR SPECKS \(label): components=\(sizes.count), fine=\(fine), largest=\(sizes.max() ?? 0), pixels=\(starPixels.count), golden=\(golden), silver=\(silver)")
+                fflush(stdout)
+                check(sizes.count >= max(20, pixelCount / 600) && fine * 10 >= sizes.count * 9 &&
+                      starPixels.count < pixelCount / 8,
+                      "star glass \(label): many distinct fine star specks occupy a small fraction of the glass")
+                check(golden > 2 && silver > 2,
+                      "star glass \(label): specks include both soft gold and silver-white reflections")
+                export(composite, name: "\(dark ? "dark" : "light")-\(density)", background: backdrop)
+                if density != .minimal {
+                    exportAnimation(name: "\(dark ? "dark" : "light")-\(density)-drifting", background: backdrop) { image($0) }
+                }
             }
         }
+        print("Liquid star glass production previews: \(previewDirectory.path)")
     }
 
     static func installationIdentity() {
@@ -716,6 +1011,12 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
     static func main() {
         precondition(Bundle.main.bundleIdentifier != "com.local.syspulse",
                      "Regression tests must run as a raw isolated executable, never the installed app.")
+        if CommandLine.arguments.contains("--menu-effects-only") {
+            displayPreferences()
+            starGlass()
+            print("\n\(passed) focused menu effect assertions passed.")
+            return
+        }
         if CommandLine.arguments.contains("--metric-colors-only") {
             metricColors()
             print("\n\(passed) focused metric color assertions passed.")
@@ -730,8 +1031,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         login()
         hostReferences()
         processCount()
-        glow()
-        iridescent()
+        starGlass()
         installationIdentity()
         panelContentSizing()
         print("\n\(passed) regression assertions passed. No GUI app installation or real login-item changes.")

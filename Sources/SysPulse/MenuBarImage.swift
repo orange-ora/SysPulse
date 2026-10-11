@@ -170,15 +170,15 @@ enum MenuBarImage {
             height: CGFloat(laidOut.count) * lineHeight + (CGFloat(laidOut.count) - 1) + spacing
         )
 
-        func draw(glyphMask: Bool = false) {
+        func draw() {
             for (rowIndex, items) in laidOut.enumerated() {
                 let offset = CGFloat(laidOut.count - 1 - rowIndex) * (lineHeight + 1)
                 for (segment, x) in items {
                     var attributes: [NSAttributedString.Key: Any] = [
                         .font: font(segment.weight),
-                        .foregroundColor: glyphMask ? NSColor.white : segment.color
+                        .foregroundColor: segment.color
                     ]
-                    if !glyphMask, let textShadow { attributes[.shadow] = textShadow }
+                    if let textShadow { attributes[.shadow] = textShadow }
                     NSAttributedString(string: segment.text, attributes: attributes)
                         .draw(at: NSPoint(x: horizontalPadding + x, y: offset + spacing / 2))
                 }
@@ -186,14 +186,15 @@ enum MenuBarImage {
         }
 
         func drawContent() {
-            if effect == .iridescent {
-                drawIridescent(size: size, appearance: appearance, elapsed: effectElapsed) {
-                    draw(glyphMask: true)
+            if includesBackground {
+                let foreground = NSImage(size: size, flipped: false) { _ in
+                    draw()
+                    return true
                 }
-            } else {
-                if includesBackground { drawEffect(size: size, effect: effect, elapsed: effectElapsed) }
-                draw()
+                drawEffect(size: size, appearance: appearance, effect: effect, elapsed: effectElapsed,
+                           foreground: foreground)
             }
+            draw()
         }
         let image = NSImage(size: size, flipped: false) { _ in
             if let appearance {
@@ -208,108 +209,222 @@ enum MenuBarImage {
     }
 
     static func background(size: NSSize, appearance: NSAppearance?, effect: MenuBarEffect,
-                           elapsed: Double?) -> NSImage? {
-        guard effect == .glow || effect == .diffuse else { return nil }
+                           elapsed: Double?, foreground: NSImage? = nil, includesStars: Bool = true,
+                           includesSilks: Bool = true) -> NSImage? {
+        guard effect != .off, size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0 else { return nil }
         let image = NSImage(size: size, flipped: false) { _ in
-            if let appearance {
-                appearance.performAsCurrentDrawingAppearance { drawEffect(size: size, effect: effect, elapsed: elapsed) }
-            } else {
-                drawEffect(size: size, effect: effect, elapsed: elapsed)
+            let draw = {
+                drawEffect(size: size, appearance: appearance, effect: effect, elapsed: elapsed,
+                           foreground: foreground, includesStars: includesStars, includesSilks: includesSilks)
             }
+            if let appearance { appearance.performAsCurrentDrawingAppearance(draw) }
+            else { draw() }
             return true
         }
         image.isTemplate = false
         return image
     }
 
-    /// 背景动效总入口，按给定效果分发。
-    ///
-    /// `elapsed` 为 nil = 不画背景（关闭，或这一帧不需要动效层）。两个背景动效共用经过时间
-    /// （`StatusItemController` 的定时器），炫彩字面在 render 的独立透明层内绘制。
-    ///
-    /// ⚠️ **效果类型必须从参数传进来，不能读 `Preferences.shared`。**
-    /// 一开始这里读的是全局单例，结果是：① 渲染函数不再可测（测试进程有自己的
-    /// bundle id，读到的是它自己的默认值 `.off`，于是怎么渲都只有文字层）；
-    /// ② 与同函数的 `density`（从参数传）不对称，埋一个"到底该信谁"的坑。
-    static func drawEffect(size: NSSize, effect: MenuBarEffect, elapsed: Double?) {
-        guard let elapsed, elapsed.isFinite,
-              size.width.isFinite, size.height.isFinite,
+    /// 各背景独立绘制；时间只驱动星点，不影响水色、细丝挑染或字面。
+    static func drawEffect(size: NSSize, appearance: NSAppearance? = nil,
+                           effect: MenuBarEffect, elapsed: Double?, foreground: NSImage? = nil,
+                           includesStars: Bool = true, includesSilks: Bool = true) {
+        guard effect != .off, size.width.isFinite, size.height.isFinite,
               size.width > 0, size.height > 0 else { return }
+        if effect == .iridescent {
+            drawLiquidStarGlass(size: size, appearance: appearance, elapsed: elapsed,
+                                foreground: foreground, includesStars: includesStars, includesSilks: includesSilks)
+            return
+        }
+        guard let elapsed, elapsed.isFinite else { return }
         switch effect {
-        case .off: return
-        case .glow:
-            // 两层各自将实际角度归一化；不能先把共用时间相位归零，
-            // 否则流光每 12 秒走了 2.5 圈，重置时会跳半圈。
-            drawGlow(size: size, elapsed: elapsed)
-        case .diffuse:
-            drawDiffuse(size: size, elapsed: elapsed)
-        case .iridescent:
-            return // 原生按钮视图提供玻璃材质；图片只绘制透明字面。
+        case .glow: drawGlow(size: size, elapsed: elapsed)
+        case .diffuse: drawDiffuse(size: size, elapsed: elapsed)
+        case .off, .iridescent: return
         }
     }
 
-    /// 五秒一轮的冷色珠光扫字；材质由菜单栏原生视图提供。
-    /// sourceIn/sourceAtop 仅作用于独立字形层，字形外保持透明。
-    private static func drawIridescent(size: NSSize, appearance: NSAppearance?,
-                                       elapsed: Double?, drawGlyphs: () -> Void) {
-        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
-              let cg = NSGraphicsContext.current?.cgContext else { return }
-        let dark = appearance?.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let palette: [NSColor] = dark ? [
-            NSColor(calibratedRed: 0.40, green: 0.70, blue: 1.00, alpha: 1),
-            NSColor(calibratedRed: 0.28, green: 0.91, blue: 0.84, alpha: 1),
-            NSColor(calibratedRed: 0.61, green: 0.58, blue: 1.00, alpha: 1),
-            NSColor(calibratedRed: 0.37, green: 0.77, blue: 1.00, alpha: 1)
-        ] : [
-            NSColor(calibratedRed: 0.12, green: 0.38, blue: 0.82, alpha: 1),
-            NSColor(calibratedRed: 0.05, green: 0.52, blue: 0.43, alpha: 1),
-            NSColor(calibratedRed: 0.38, green: 0.30, blue: 0.85, alpha: 1),
-            NSColor(calibratedRed: 0.08, green: 0.45, blue: 0.77, alpha: 1)
-        ]
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let base = CGGradient(colorsSpace: colorSpace,
-                                    colors: palette.map { $0.cgColor } as CFArray,
-                                    locations: [0, 0.30, 0.65, 1]) else { return }
-        let time = elapsed.flatMap { $0.isFinite ? $0 : nil } ?? 0
-        let phase = time.truncatingRemainder(dividingBy: 5) / 5
-        // 320 pt / 5 s：各档相同速度，80 pt 柔边带内包含 16 pt 明亮中心。
-        let tileWidth: CGFloat = 320
-        let shift = CGFloat(phase) * tileWidth
-        let startX = shift - tileWidth
-        let tiles = Int(ceil((size.width - startX) / tileWidth))
-        let span = CGFloat(tiles) * tileWidth
-        let peak = dark ? NSColor(calibratedRed: 0.90, green: 0.99, blue: 1, alpha: 1) :
-            NSColor(calibratedRed: 0.05, green: 0.45, blue: 1, alpha: 1)
-        let transparent = peak.withAlphaComponent(0)
-        var colors: [CGColor] = []
-        var locations: [CGFloat] = []
-        for tile in 0..<tiles {
-            let stops: [(CGFloat, NSColor)] = [
-                (0, transparent), (0.375, transparent),
-                (0.425, peak.withAlphaComponent(0.60)),
-                (0.475, peak), (0.525, peak),
-                (0.575, peak.withAlphaComponent(0.60)),
-                (0.625, transparent), (1, transparent)
-            ]
-            for (position, color) in stops where tile == 0 || position > 0 {
-                colors.append(color.cgColor)
-                locations.append((CGFloat(tile) + position) / CGFloat(tiles))
+    /// 只有星点缓慢散动；水蓝色内层稳定，不再绘制扫光、流光或闪烁。
+    private static var cachedStarMaskSource: NSImage?
+    private static var cachedStarMask: NSImage?
+
+    private static func starMask(for foreground: NSImage?) -> NSImage? {
+        guard let foreground else { return nil }
+        if cachedStarMaskSource === foreground { return cachedStarMask }
+        let width = Int(ceil(foreground.size.width * 2))
+        let height = Int(ceil(foreground.size.height * 2))
+        guard width > 0, height > 0,
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                  bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                  colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32),
+              let bytes = bitmap.bitmapData,
+              let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        bytes.initialize(repeating: 0, count: width * height * 4)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        foreground.draw(in: NSRect(x: 0, y: 0, width: width, height: height),
+                        from: .zero, operation: .copy, fraction: 1)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        var occupied = [Bool](repeating: false, count: width * height)
+        for index in occupied.indices { occupied[index] = bytes[index * 4 + 3] > 12 }
+        // 留出一 pt 的字面保护区；整颗微粒不会贴到笔画或穿过数字。
+        for y in 0..<height {
+            for x in 0..<width {
+                var blocked = false
+                for dy in -2...2 where !blocked {
+                    for dx in -2...2 where dx * dx + dy * dy <= 4 {
+                        let nx = x + dx, ny = y + dy
+                        if nx >= 0, nx < width, ny >= 0, ny < height, occupied[ny * width + nx] {
+                            blocked = true
+                            break
+                        }
+                    }
+                }
+                let offset = (y * width + x) * 4
+                let value: UInt8 = blocked ? 255 : 0
+                for channel in 0..<4 { bytes[offset + channel] = value }
             }
         }
-        guard let shine = CGGradient(colorsSpace: colorSpace, colors: colors as CFArray,
-                                     locations: locations) else { return }
+        bitmap.size = foreground.size
+        let mask = NSImage(size: foreground.size)
+        mask.addRepresentation(bitmap)
+        cachedStarMaskSource = foreground
+        cachedStarMask = mask
+        return mask
+    }
+
+    /// 五缕短而细的挑染，端部自然淡出；不发光，也不做横向扫动。
+    private static func drawLiquidSilks(in cg: CGContext, size: NSSize, dark: Bool) {
+        let gold = NSColor(calibratedRed: 1, green: 0.84, blue: 0.50, alpha: 1)
+        let lilac = NSColor(calibratedRed: 0.68, green: 0.51, blue: 0.95, alpha: 1)
+        let cyan = NSColor(calibratedRed: 0.30, green: 0.84, blue: 0.96, alpha: 1)
+        let rose = NSColor(calibratedRed: 0.94, green: 0.57, blue: 0.76, alpha: 1)
+        let middleY: CGFloat = size.height > 25 ? 0.48 : 0.88
+        let upperY: CGFloat = size.height > 25 ? 0.93 : 0.91
+        let strands: [(start: CGFloat, end: CGFloat, y: CGFloat, endY: CGFloat, tint: NSColor)] = [
+            (0.02, 0.31, middleY, middleY - 0.02, gold),
+            (0.41, 0.73, upperY, upperY - 0.01, gold),
+            (0.17, 0.48, upperY - 0.02, upperY, lilac),
+            (0.57, 0.91, middleY - 0.01, middleY + 0.01, cyan),
+            (0.76, 1.03, upperY, upperY - 0.04, rose)
+        ]
+        for strand in strands {
+            let start = CGPoint(x: size.width * strand.start, y: size.height * strand.y)
+            let end = CGPoint(x: size.width * strand.end, y: size.height * strand.endY)
+            let span = end.x - start.x
+            let path = CGMutablePath()
+            path.move(to: start)
+            path.addCurve(to: end,
+                          control1: CGPoint(x: start.x + span * 0.32, y: start.y - size.height * 0.06),
+                          control2: CGPoint(x: start.x + span * 0.68, y: end.y + size.height * 0.06))
+            let alpha: CGFloat = dark ? 0.48 : 0.40
+            let colors = [strand.tint.withAlphaComponent(0), strand.tint.withAlphaComponent(alpha),
+                          strand.tint.withAlphaComponent(alpha * 0.88), strand.tint.withAlphaComponent(0)]
+            cg.saveGState()
+            cg.setLineWidth(0.35)
+            cg.setLineCap(.round)
+            cg.addPath(path)
+            cg.replacePathWithStrokedPath()
+            cg.clip()
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                         colors: colors.map { $0.cgColor } as CFArray,
+                                         locations: [0, 0.22, 0.76, 1]) {
+                cg.drawLinearGradient(gradient, start: start, end: end, options: [])
+            }
+            cg.restoreGState()
+        }
+    }
+
+    private static func drawLiquidStarGlass(size: NSSize, appearance: NSAppearance?, elapsed: Double?,
+                                            foreground: NSImage?, includesStars: Bool, includesSilks: Bool) {
+        guard let cg = NSGraphicsContext.current?.cgContext else { return }
+        let dark = (appearance ?? NSAppearance.currentDrawing()).bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let time = elapsed.flatMap { $0.isFinite ? $0 : nil } ?? 0
+        let rect = CGRect(origin: .zero, size: size).insetBy(dx: 0.65, dy: 0.65)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let radius = min(rect.width, rect.height) / 2
+        let capsule = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+        let waterBlue = NSColor(calibratedRed: 0.06, green: 0.43, blue: 0.86, alpha: 1)
+        let waterAqua = NSColor(calibratedRed: 0.12, green: 0.62, blue: 0.91, alpha: 1)
+        let waterViolet = NSColor(calibratedRed: 0.44, green: 0.28, blue: 0.88, alpha: 1)
+        let blue = dark ? waterBlue.blended(withFraction: 0.22, of: .black)! : waterBlue
+        let aqua = dark ? waterAqua.blended(withFraction: 0.22, of: .black)! : waterAqua
+        let violet = dark ? waterViolet.blended(withFraction: 0.22, of: .black)! : waterViolet
+        let opacity: CGFloat = dark ? 0.18 : 0.15
+        // 紫色融入更淡的水色渐变，让菜单栏背景更多透出来。
+        let colors = [blue.withAlphaComponent(opacity), aqua.withAlphaComponent(opacity * 0.92),
+                      violet.withAlphaComponent(opacity * 0.96)]
         cg.saveGState()
-        cg.clip(to: CGRect(origin: .zero, size: size))
-        cg.beginTransparencyLayer(auxiliaryInfo: nil)
-        drawGlyphs()
-        cg.setBlendMode(.sourceIn)
-        cg.drawLinearGradient(base, start: .zero, end: CGPoint(x: size.width, y: 0),
-                              options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-        cg.setBlendMode(.sourceAtop)
-        cg.drawLinearGradient(shine, start: CGPoint(x: startX, y: 0),
-                              end: CGPoint(x: startX + span, y: 0),
-                              options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-        cg.endTransparencyLayer()
+        cg.addPath(capsule)
+        cg.clip()
+        if let fill = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                 colors: colors.map { $0.cgColor } as CFArray, locations: [0, 0.57, 1]) {
+            cg.drawLinearGradient(fill, start: .zero, end: CGPoint(x: size.width, y: size.height * 0.60),
+                                  options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        }
+        // 一层同色系的弧面折射，让整个胶囊像灌满清水，而非几团叠加的色光。
+        let fold = CGMutablePath()
+        fold.move(to: CGPoint(x: -8, y: size.height * 0.30))
+        fold.addCurve(to: CGPoint(x: size.width + 8, y: size.height * 0.58),
+                      control1: CGPoint(x: size.width * 0.30, y: size.height * 0.95),
+                      control2: CGPoint(x: size.width * 0.70, y: -size.height * 0.20))
+        fold.addLine(to: CGPoint(x: size.width + 8, y: size.height + 8))
+        fold.addLine(to: CGPoint(x: -8, y: size.height + 8))
+        fold.closeSubpath()
+        cg.setFillColor(aqua.withAlphaComponent(dark ? 0.04 : 0.03).cgColor)
+        cg.addPath(fold)
+        cg.fillPath()
+
+        if includesStars || includesSilks {
+            let exclusion = starMask(for: foreground)
+            // 细丝与星点共用字面保护区，水色本身仍保持完整。
+            cg.beginTransparencyLayer(auxiliaryInfo: nil)
+            if includesSilks { drawLiquidSilks(in: cg, size: size, dark: dark) }
+            if includesStars {
+                func random(_ seed: Double) -> Double {
+                    let value = sin(seed * 127.1 + 311.7) * 43758.5453
+                    return value - floor(value)
+                }
+                func reflected(_ value: Double) -> Double {
+                    let wrapped = value - floor(value / 2) * 2
+                    return wrapped <= 1 ? wrapped : 2 - wrapped
+                }
+                let count = max(240, Int(size.width * size.height / 5.6))
+                let extraGoldCount = max(40, count / 6)
+                let gold = NSColor(calibratedRed: 1, green: 0.84, blue: 0.50, alpha: 1)
+                // 均匀移除四分之一，保留剩余星点的身份、金白比例与散动速度。
+                for index in 0..<(count + extraGoldCount) where index % 4 != 3 {
+                    let seed = Double(index)
+                    let rate = 0.24 + random(seed + 137) * 0.36
+                    let phase = random(seed + 293) * .pi * 2
+                    let angle = time * rate + phase
+                    // 固定身份、各自的速度和轨迹；散动没有共同方向，也不改变亮度。
+                    let driftX = (0.012 + random(seed + 409) * 0.022) * sin(angle)
+                               + 0.012 * sin(time * (rate * 1.37) - phase * 1.8)
+                    let driftY = 0.13 * sin(time * (rate * 0.71) + phase * 1.7)
+                               + 0.07 * sin(time * (rate * 1.31) - phase)
+                    let u = reflected(random(seed + 1) + driftX)
+                    let v = reflected(random(seed + 71) + driftY)
+                    let point = CGPoint(x: 1.5 + u * max(size.width - 3, 1),
+                                        y: 1.5 + v * max(size.height - 3, 1))
+                    let dotRadius: CGFloat = index % 17 == 0 ? 0.50 : index % 5 == 0 ? 0.36 : 0.24
+                    let alpha: CGFloat = index % 17 == 0 ? 0.68 : index % 5 == 0 ? 0.55 : 0.43
+                    let tint = index >= count || random(seed + 911) < 0.22 ? gold : NSColor.white
+                    cg.setFillColor(tint.withAlphaComponent(alpha).cgColor)
+                    cg.fillEllipse(in: CGRect(x: point.x - dotRadius, y: point.y - dotRadius,
+                                              width: dotRadius * 2, height: dotRadius * 2))
+                }
+            }
+            if let exclusion {
+                cg.setBlendMode(.destinationOut)
+                exclusion.draw(in: NSRect(origin: .zero, size: size), from: .zero,
+                               operation: .destinationOut, fraction: 1)
+                cg.setBlendMode(.normal)
+            }
+            cg.endTransparencyLayer()
+        }
         cg.restoreGState()
     }
 
@@ -489,7 +604,7 @@ enum MenuBarImage {
             // 全程最小 alpha 0.00 → 0.49，相邻色相跳变峰值 53.8° → 24°。
             let stops: [(CGFloat, CGFloat)] = [(0.00, 1.000), (0.60, 0.800), (0.85, 0.400), (1.00, 0.000)]
             let colors = stops.map {
-                NSColor(hue: hue, saturation: 0.48, brightness: 0.90, alpha: $0.1 * peakAlpha)
+                NSColor(hue: hue, saturation: 0.64, brightness: 0.95, alpha: $0.1 * peakAlpha)
             }
             let locations = stops.map { $0.0 }
 
@@ -545,7 +660,7 @@ enum MenuBarImage {
                 b += color.blueComponent * k
                 a += k
             }
-            colors.append(NSColor(red: min(r, 1), green: min(g, 1), blue: min(b, 1), alpha: min(a, 1) * 0.46))
+            colors.append(NSColor(red: min(r, 1), green: min(g, 1), blue: min(b, 1), alpha: min(a, 1) * 0.60))
             locations.append(u)
         }
 
@@ -577,7 +692,7 @@ enum MenuBarImage {
         let bands: CGFloat = 1.1
         let travel: CGFloat = 2.0
         let phase = (elapsed / effectGlowCycleSeconds * Double(travel)).truncatingRemainder(dividingBy: 1)
-        let strength: CGFloat = 0.18
+        let strength: CGFloat = 0.12
         let waveAngle: CGFloat = 78
         let samples = 12
 

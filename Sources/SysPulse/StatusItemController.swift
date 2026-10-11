@@ -70,53 +70,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var measuredDensityIndex: Int?
     /// 各档位实测过的最大图片宽度，用来判断"升档是否放得下"
     private var densityWidths: [CGFloat] = [0, 0, 0]
-    /// 菜单栏**背景动效**（流光 / 漫散射）的重画帧率。
-    ///
-    /// ⚠️ **改这一个常量即可**：定时器间隔与每帧相位步进都从它派生，不要再各写一遍
-    /// 字面量（否则会出现"帧率改了但动画速度也跟着变"的隐性耦合）。
-    ///
-    /// 为什么是 10 而不是原来的 15：流光每帧都要整条重画（`MenuBarImage.render`
-    /// 含 `drawGlow` + `drawRipple`，实测约 9ms/帧），15fps 时闲置占用约 **14.8% CPU**
-    /// （关闭流光为 0.73%）。2026-09-30 实测各帧率的相邻帧位移（占满量程，8 位 1 灰阶 ≈ 0.39%）：
-    ///
-    /// | 帧率 | 每帧 RMS 变化 | 时间连续性台阶(均值/峰值) | 相对 15fps 的 CPU |
-    /// | --- | --- | --- | --- |
-    /// | 15fps | 0.940% | 0.379% / 0.784% | 100% |
-    /// | 12fps | 1.162% | 0.479% / 1.176% | 80% |
-    /// | **10fps** | **1.382%** | **0.575% / 1.176%** | **≈67%** |
-    /// | 8fps | 1.721% | 0.711% / 1.569% | 53% |
-    ///
-    /// 注意：15fps 时每帧位移就已经高于 1 个灰阶了，所以这个流光从来不是靠"单帧不可辨"
-    /// 取胜，而是靠**变化在时间上等步连续**。台阶到 8fps 会翻倍，那才是风险区。
-    /// 10fps 是"台阶仍在 1 灰阶量级"与省电之间的拐点，故取此值（2026-09-30 选定）。
-    ///
-    /// ⚠️ **为什么不要再往上加 —— 2026-10-01 实测过 20fps。**
-    /// 上面那张表是**流光**的数字；漫散射（现在默认用的那个）单帧变化更小，
-    /// 所以它的"每帧变化 / 8 位 1 灰阶(≈0.39%)"余量更少，天花板来得更早：
-    ///
-    /// | 帧率 | 漫散射每帧 RMS 变化 | 相对 1 灰阶 | 实测 CPU |
-    /// | --- | --- | --- | --- |
-    /// | 8fps | 0.790% | 2.0× | —— |
-    /// | **10fps** | **0.669%** | **1.7×** | **9.54%** |
-    /// | 12fps | 0.568% | 1.5× | —— |
-    /// | 15fps | 0.482% | 1.2× | —— |
-    /// | 20fps | 0.418% | **1.07×** | **18.70%** |
-    /// | 30fps | 0.350% | **0.9×（低于地板）** | —— |
-    ///
-    /// **关键判据**：每帧变化一旦小于 1 个灰阶，画面**根本表达不出这么小的变化**，
-    /// 多出来的帧是在重复同一个颜色 —— 外推交叉点约在 **24fps**。
-    /// 也就是说 20fps 只剩 7% 余量、30fps 已经纯浪费，而 CPU 是**线性**翻倍的
-    /// （10fps 9.54% → 20fps 18.70%）。**10fps 已经是"看不出分档"的性价比点。**
-    /// ⚠️ 这套数字**只对漫散射成立**：流光单帧变化更大（15fps 0.940% / 10fps 1.382%），
-    /// 所以"该多少帧"要分效果看，不存在一个通用值。
+    /// 共用背景时钟；液态玻璃只驱动星点，其他背景按各自规则变化。
+    /// 保持十 fps，不增加新时钟；面板开合期间同样继续更新。
     private let effectFramesPerSecond: Double = 10
-    // 相位周期这个概念已废弃：定时器现在只累加**秒数**（`effectElapsed`），
-    // 各效果在自己的绘制函数里定义周期 —— 流光是 `MenuBarImage.effectGlowCycleSeconds`，
-    // 漫散射是每个光点自己的 `period`。这样"每个光点用自己的周期"才有可能。
-    /// 背景动效的定时器与当前相位（0…1，两个效果共用同一个时钟）
+    // 共用实际经过秒数，各效果在自己的绘制函数里换算周期。
+    /// 所有背景效果共用的轻量定时器。
     private var effectTimer: Timer?
-    /// 已经过的秒数（不是 0…1 相位）。各效果自己按自己的周期换算。
+    /// 已经过的秒数（不是 0…1 相位）。按单调时钟推进，回调延迟不改变动画速度。
     private var effectElapsed: Double = 0
+    private var effectStartedAt: CFTimeInterval = 0
     /// 屏幕不可见（休眠 / 锁屏 / 屏保）时挂起动效。挂起 != 关闭：
     /// 回来之后若用户开关仍为开，要自动续上。
     ///
@@ -236,8 +198,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
         monitor.start()
 
-        // 菜单栏动效（流光 / 光晕 / 炫彩）：选中效果时共用 `effectFramesPerSecond`
-        // 的轻量计时器。前两项绘制背景，炫彩只绘制字形内的光泽；
+        // 玻璃内的微粒使用共用的轻量时钟；只更新背景，字面复用缓存。
         // 动效帧不参与排版档位决策，关闭后立刻停表。
         preferences.$menuBarEffect
             .receive(on: RunLoop.main)
@@ -301,7 +262,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// - Parameter redrawIfStopped: 停下来之后要不要立刻按当前相位补画一次。
     ///   用户手动切成「关闭」时需要（要立刻擦掉背景，见原逻辑）；睡眠/锁屏时不需要。
     private func applyEffectState(redrawIfStopped: Bool) {
-        statusGlassView?.setHoverEnabled(preferences.menuBarEffect != .off && effectSuspendReasons.isEmpty)
+        statusGlassView?.setHoverEnabled(preferences.menuBarEffect != .off &&
+                                        preferences.menuBarEffect != .iridescent && effectSuspendReasons.isEmpty)
         if preferences.menuBarEffect != .off, effectSuspendReasons.isEmpty {
             startEffectTimer()
         } else {
@@ -316,11 +278,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private func startEffectTimer() {
         guard effectTimer == nil else { return }
         let interval = 1.0 / effectFramesPerSecond
+        effectStartedAt = CACurrentMediaTime() - effectElapsed
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.effectElapsed += 1.0 / self.effectFramesPerSecond
-            // 开合短暂让出主线程的位图绘制预算，时间相位与系统采样仍照常推进。
-            guard self.presentationAnimation == nil else { return }
+            self.effectElapsed = CACurrentMediaTime() - self.effectStartedAt
+            // 背景与面板开合并行更新；复用文字缓存且不触发排版档位决策。
             self.updateStatusItem(with: self.monitor.snapshot, allowLayoutChange: false)
         }
         timer.tolerance = interval * 0.1
@@ -867,7 +829,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// 动效定时器每一拍拿到的都是同一份采样，所以直接复用上一张 `NSImage`。
     /// 每拍重画它会让 AppKit 重新光栅化文字、再排一次状态栏布局，而画出来的像素没有任何变化。
     ///
-    /// 炫彩的字形随相位变化，依旧每拍重画，不缓存。
+    /// 星点在字面保护区之外散动；数值文字只随采样更新。
     private func textImage(for snapshot: MetricsSnapshot, density: MenuBarDensity, appearance: NSAppearance?) -> NSImage? {
         let effect = preferences.menuBarEffect
         let render = {
@@ -881,7 +843,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
                 includesBackground: false
             )
         }
-        guard effect != .iridescent else { return render() }
+        // 液态玻璃与星点由独立背景承载，字面保持清晰。
 
         let key = TextImageKey(
             timestamp: snapshot.timestamp,
@@ -929,10 +891,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             statusGlassView = glass
         }
         if glass.frame != button.bounds { glass.frame = button.bounds }
+        let backgroundTime = usesGlass && NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : effectElapsed
         let background = MenuBarImage.background(size: image.size, appearance: button.effectiveAppearance,
-                                                effect: preferences.menuBarEffect, elapsed: effectElapsed)
+                                                effect: preferences.menuBarEffect, elapsed: backgroundTime,
+                                                foreground: image)
         glass.setImage(image, background: background)
-        glass.setHoverEnabled(effectSuspendReasons.isEmpty)
+        glass.setHoverEnabled(!usesGlass && effectSuspendReasons.isEmpty)
     }
 
     /// 换档那一瞬间就按**预测的最终位置**把面板重新锚定好，抢在"系统用中间态摆错位置"
@@ -1217,13 +1181,18 @@ private final class StatusItemGlassView: NSView {
         layoutMotionView.addSubview(contentView)
         contentView.addSubview(materialView)
         materialView.wantsLayer = true
+        if usesGlass {
+            backgroundImageView.wantsLayer = true
+            contentView.addSubview(backgroundImageView)
+        }
         imageView.wantsLayer = true
         contentView.addSubview(imageView)
 
         // 反光位于字形下方，边缘亮线独立描画；不使用悬浮阴影或放大。
         hoverReflection.type = .radial
-        hoverReflection.colors = [NSColor.white.withAlphaComponent(0.20).cgColor,
-                                  NSColor.white.withAlphaComponent(0.06).cgColor,
+        let reflectionColor = usesGlass ? NSColor(calibratedRed: 0.79, green: 0.92, blue: 1, alpha: 1) : .white
+        hoverReflection.colors = [reflectionColor.withAlphaComponent(usesGlass ? 0.10 : 0.12).cgColor,
+                                  reflectionColor.withAlphaComponent(usesGlass ? 0.025 : 0.035).cgColor,
                                   NSColor.clear.cgColor]
         hoverReflection.locations = [0, 0.45, 1]
         hoverReflection.opacity = 0
@@ -1233,8 +1202,8 @@ private final class StatusItemGlassView: NSView {
             contentView.layer?.insertSublayer(hoverReflection, below: textLayer)
         }
         hoverHighlight.type = .radial
-        hoverHighlight.colors = [NSColor.white.withAlphaComponent(0.80).cgColor,
-                                 NSColor.white.withAlphaComponent(0.08).cgColor,
+        hoverHighlight.colors = [reflectionColor.withAlphaComponent(usesGlass ? 0.65 : 0.80).cgColor,
+                                 reflectionColor.withAlphaComponent(0.08).cgColor,
                                  NSColor.clear.cgColor]
         hoverHighlight.locations = [0, 0.45, 1]
         hoverHighlight.opacity = 0
@@ -1385,7 +1354,7 @@ private final class StatusItemGlassView: NSView {
     }
 
     private func resetLayoutMotion() {
-        let geometryLayers: [CALayer?] = [layoutMotionView.layer, materialView.layer, imageView.layer,
+        let geometryLayers: [CALayer?] = [layoutMotionView.layer, materialView.layer, backgroundImageView.layer, imageView.layer,
                                         contentView.layer, hoverReflection, reflectionMask,
                                         hoverHighlight, highlightMask]
         for layer in geometryLayers {
@@ -1511,6 +1480,7 @@ private final class StatusItemGlassView: NSView {
         layoutMotionView.frame = bounds
         contentView.frame = frame
         materialView.frame = contentView.bounds
+        if usesGlass { backgroundImageView.frame = contentView.bounds }
         if #available(macOS 26.0, *), let glass = materialView as? NSGlassEffectView {
             glass.cornerRadius = height / 2
         } else if usesGlass {
@@ -1544,6 +1514,13 @@ private final class StatusItemGlassView: NSView {
             let oldRect = NSRect(x: 0, y: 0, width: oldWidth, height: height)
             animateGeometry(materialView.layer, keyPath: "bounds", from: NSValue(rect: oldRect),
                             to: materialView.layer.map { NSValue(rect: $0.bounds) })
+            if usesGlass {
+                animateGeometry(backgroundImageView.layer, keyPath: "bounds", from: NSValue(rect: oldRect),
+                                to: backgroundImageView.layer.map { NSValue(rect: $0.bounds) })
+                animateGeometry(backgroundImageView.layer, keyPath: "position",
+                                from: NSValue(point: NSPoint(x: oldWidth / 2, y: height / 2)),
+                                to: backgroundImageView.layer.map { NSValue(point: $0.position) })
+            }
             animateGeometry(hoverHighlight, keyPath: "bounds", from: NSValue(rect: oldRect),
                             to: NSValue(rect: hoverHighlight.bounds))
             animateGeometry(highlightMask, keyPath: "bounds", from: NSValue(rect: oldRect),

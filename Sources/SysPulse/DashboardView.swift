@@ -21,6 +21,14 @@ struct DashboardView: View {
     @PanelState private var displayedDetail: DashboardDetail
     @StateObject private var detailMotion: PanelDetailAnimation
     @PanelState private var nativeCanvasAttached = false
+    @PanelState private var hoveredMetric: DashboardDetail?
+    @PanelState private var isDetailHovered = false
+
+    private var detailAutoCollapseKey: DashboardDetail? {
+        guard page == .overview, let detail = selectedDetail,
+              hoveredMetric != detail, !isDetailHovered else { return nil }
+        return detail
+    }
 
     init(monitor: SystemMonitor, preferences: Preferences,
          initialPage: DashboardPage = .overview, initialDetail: DashboardDetail? = nil,
@@ -91,6 +99,13 @@ struct DashboardView: View {
         .environment(\.colorScheme, .light)
         .preferredColorScheme(.light)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: usesClearGlass)
+        .task(id: detailAutoCollapseKey) { [detail = detailAutoCollapseKey] in
+            await autoCollapseDetail(afterIdleFor: detail)
+        }
+        .onDisappear {
+            hoveredMetric = nil
+            isDetailHovered = false
+        }
     }
 
     private var content: some View {
@@ -121,7 +136,7 @@ struct DashboardView: View {
             if usesWindowSurface {
                 PanelDetailSection(animation: detailMotion, expanded: selectedDetail != nil,
                                    reduceMotion: reduceMotion,
-                                   detail: AnyView(detailPanel(displayedDetail)),
+                                   detail: { AnyView(detailPanel(displayedDetail)) },
                                    tail: AnyView(overviewTail))
                     .frame(width: 332)
                     .fixedSize(horizontal: false, vertical: true)
@@ -141,7 +156,6 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 12) {
             deviceInformationPanel
             metricToggles.modifier(PanelReadingPlate(palette: palette))
-            menuBarEffects.modifier(PanelReadingPlate(palette: palette)).padding(.top, 6)
             separator
             footer
                 .padding(.horizontal, 4)
@@ -154,15 +168,15 @@ struct DashboardView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
                     Image(systemName: "waveform.path.ecg")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(palette.accent)
-                        .frame(width: 16, height: 17)
+                        .frame(width: 18, height: 19)
                     Text("SysPulse")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                 }
                 Text("系统运行 \(Format.uptime(snapshot.uptime)) · \(snapshot.processCount) 进程")
                     .font(.system(size: 10.5))
@@ -170,6 +184,8 @@ struct DashboardView: View {
                     .foregroundStyle(palette.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
+                    // 对齐上方文字，避开 18pt 图标和 8pt 图文间距。
+                    .padding(.leading, 26)
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Button { detailMotion.cancel(); page = .settings } label: {
@@ -187,7 +203,7 @@ struct DashboardView: View {
             .accessibilityLabel("打开显示与外观设置")
             .accessibilityIdentifier("panel.settings")
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 10)
     }
 
     private var metricGrid: some View {
@@ -237,6 +253,7 @@ struct DashboardView: View {
         }
         .buttonStyle(PointerCardButtonStyle(tint: palette.metricTint(kind), palette: palette,
                                            selected: selectedDetail == kind))
+        .onHover { updateMetricHover(kind, hovered: $0) }
         .help(detailDescription(kind))
         .accessibilityLabel("\(kind.rawValue)，\(fraction.map { Format.percent($0) } ?? "尚未就绪")，\(detail)\(kind == .memory ? "，压力：" + snapshot.memoryPressure.title : "")")
         .accessibilityHint("展开详细信息")
@@ -279,6 +296,7 @@ struct DashboardView: View {
         }
         .buttonStyle(PointerCardButtonStyle(tint: palette.metricTint(.network), palette: palette,
                                            selected: selectedDetail == .network))
+        .onHover { updateMetricHover(.network, hovered: $0) }
         .help(detailDescription(.network))
         .accessibilityLabel("网络，下载 \(Format.speed(snapshot.downSpeed))，上传 \(Format.speed(snapshot.upSpeed))")
         .accessibilityHint("展开本次运行累计流量")
@@ -299,9 +317,24 @@ struct DashboardView: View {
     }
 
     private func setDetail(_ detail: DashboardDetail?) {
+        if detail != selectedDetail { isDetailHovered = false }
         if usesWindowSurface { detailMotion.request(expanded: detail != nil) }
         if let detail { displayedDetail = detail }
         selectedDetail = detail
+    }
+
+    private func updateMetricHover(_ kind: DashboardDetail, hovered: Bool) {
+        if hovered { hoveredMetric = kind }
+        else if hoveredMetric == kind { hoveredMetric = nil }
+    }
+
+    @MainActor
+    private func autoCollapseDetail(afterIdleFor detail: DashboardDetail?) async {
+        guard let detail else { return }
+        do { try await Task.sleep(nanoseconds: 10_000_000_000) }
+        catch { return }
+        guard !Task.isCancelled, detailAutoCollapseKey == detail else { return }
+        setDetail(nil)
     }
 
     private func toggleDetail(_ detail: DashboardDetail) {
@@ -362,6 +395,10 @@ struct DashboardView: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .modifier(tileStyle(kind, selected: false))
+        .background(PanelCardPointerTracking { point in
+            let hovered = point != nil && selectedDetail != nil
+            if isDetailHovered != hovered { isDetailHovered = hovered }
+        })
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: kind)
     }
 
@@ -415,16 +452,12 @@ struct DashboardView: View {
     }
 
     private var menuBarEffects: some View {
-        HStack(spacing: 3) {
-            Text("光　效")
-                .font(.system(size: 11))
-                .foregroundStyle(palette.secondary)
-                .frame(width: 36, alignment: .leading)
+        settingSection("菜单栏背景") {
             PanelSegmentedControl(selection: $preferences.menuBarEffect,
                 options: MenuBarEffect.allCases.map { ($0, $0.title) },
-                label: "菜单栏光效", palette: palette,
+                label: "菜单栏背景", palette: palette,
                 optionHelp: { effect in
-                    effect == .iridescent ? "清透玻璃衬托冷色文字，加亮珠光沿字形扫过" : effect.title
+                    effect == .iridescent ? "通透水蓝玻璃内有细碎星点自然散动，文字区域保持清晰" : effect.title
                 },
                 optionIdentifier: { "panel.effect.\($0.rawValue)" })
         }
@@ -492,6 +525,7 @@ struct DashboardView: View {
                     options: [(.auto, "自动"), (.full, "单行"), (.compact, "双行"), (.minimal, "极简")],
                     label: "菜单栏排版", palette: palette)
             }
+            menuBarEffects
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("玻璃通透")
@@ -1027,6 +1061,9 @@ private struct PanelGlassSlider: View {
     @Environment(\.isEnabled) private var isEnabled
     @PanelState private var isHovered = false
     @PanelState private var isDragging = false
+    @PanelState private var dragPull: CGFloat = 0
+    @PanelState private var lastDragPosition: CGFloat?
+    @PanelState private var lastDragTime: Date?
     @FocusState private var isFocused: Bool
 
     /// 透明玻璃槽加厚，滑钮略高于轨道；整体仍保留紧凑的设置页尺度。
@@ -1039,38 +1076,15 @@ private struct PanelGlassSlider: View {
         GeometryReader { geometry in
             let travel = max(1, geometry.size.width - knobWidth)
             let fraction = min(max(value, 0), 1)
-            ZStack(alignment: .leading) {
-                Color.clear
-                    .modifier(PanelSliderClearGlass())
-                    .frame(height: trackHeight)
-                    .overlay {
-                        PanelSliderStarlight(reduced: reduceMotion || !isEnabled,
-                                             active: isHovered || isDragging,
-                                             engaged: isDragging || isFocused,
-                                             dragging: isDragging,
-                                             progress: fraction)
-                            .frame(height: trackHeight)
-                            .mask {
-                                Canvas { context, size in
-                                    context.fill(Path(CGRect(x: 0, y: 0,
-                                        width: travel * fraction + knobWidth / 2,
-                                        height: size.height)), with: .color(.white))
-                                    let width = knobWidth * knobScale
-                                    let height = knobHeight * knobScale
-                                    let cutout = CGRect(x: travel * fraction - (width - knobWidth) / 2,
-                                                        y: (size.height - height) / 2,
-                                                        width: width, height: height)
-                                    context.blendMode = .destinationOut
-                                    context.fill(Path(roundedRect: cutout, cornerRadius: height / 2),
-                                                 with: .color(.white))
-                                }
-                            }
-                            .clipShape(Capsule())
-                            .opacity(fraction > 0 ? 1 : 0)
-                            .allowsHitTesting(false)
-                    }
-                knob.offset(x: travel * fraction)
-            }
+            PanelSliderPosition(progress: fraction,
+                chrome: PanelSliderChrome(progress: fraction, travel: travel,
+                                          knobSize: CGSize(width: knobWidth, height: knobHeight),
+                                          trackHeight: trackHeight,
+                                          hovered: isHovered, dragging: isDragging, focused: isFocused,
+                                          reduced: reduceMotion, enabled: isEnabled,
+                                          press: reduceMotion ? 0 : isDragging ? 1 : 0,
+                                          pull: reduceMotion ? 0 : dragPull,
+                                          hover: reduceMotion ? 0 : isHovered ? 1 : 0))
             .frame(maxHeight: .infinity)
             .animation(isDragging || reduceMotion ? nil : .smooth(duration: 0.23, extraBounce: 0), value: fraction)
             .contentShape(Rectangle())
@@ -1078,9 +1092,18 @@ private struct PanelGlassSlider: View {
                 .onChanged { drag in
                     isDragging = true
                     isFocused = true
-                    setValue((drag.location.x - knobWidth / 2) / travel)
+                    let position = min(max(drag.location.x - knobWidth / 2, 0), travel)
+                    if !reduceMotion, let previous = lastDragPosition, let previousTime = lastDragTime {
+                        let elapsed = max(0.008, drag.time.timeIntervalSince(previousTime))
+                        let velocity = (position - previous) / elapsed
+                        let target = min(max(velocity / 650, -1), 1)
+                        dragPull = dragPull * 0.35 + target * 0.65
+                    }
+                    lastDragPosition = position
+                    lastDragTime = drag.time
+                    setValue(position / travel)
                 }
-                .onEnded { _ in isDragging = false })
+                .onEnded { _ in finishDrag() })
         }
         .frame(height: 24)
         .onHover { isHovered = $0 }
@@ -1099,24 +1122,20 @@ private struct PanelGlassSlider: View {
                 .accessibilityValue(valueText)
                 .accessibilityIdentifier("panel.transparency")
         }
+        .onDisappear { finishDrag() }
+        .onChange(of: isEnabled) { _, enabled in
+            if !enabled { finishDrag() }
+        }
+        .onChange(of: reduceMotion) { _, reduced in
+            if reduced { dragPull = 0 }
+        }
     }
 
-    private var knobScale: CGFloat {
-        reduceMotion ? 1 : isDragging ? 1.06 : isHovered ? 1.03 : 1
-    }
-
-    private var knob: some View {
-        Color.clear
-            .modifier(PanelSliderClearGlass())
-            .overlay {
-                Capsule().strokeBorder(.white.opacity(isFocused ? 0.95 : isHovered || isDragging ? 0.80 : 0.50),
-                                        lineWidth: isFocused ? 1.25 : 0.75)
-                    .allowsHitTesting(false)
-            }
-            .frame(width: knobWidth, height: knobHeight)
-            .scaleEffect(knobScale)
-            .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: isDragging)
-            .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: isHovered)
+    private func finishDrag() {
+        isDragging = false
+        dragPull = 0
+        lastDragPosition = nil
+        lastDragTime = nil
     }
 
     private func setValue(_ proposed: Double) {
@@ -1131,8 +1150,129 @@ private struct PanelGlassSlider: View {
     }
 }
 
+/// 位置只接受数值变化动画，形变的弹簧不会再次插值滑钮位置。
+private struct PanelSliderPosition: View, Animatable {
+    var progress: Double
+    let chrome: PanelSliderChrome
+
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    var body: some View {
+        var visual = chrome
+        visual.progress = progress
+        return visual
+            .animation(visual.reduced ? nil : .spring(response: 0.26, dampingFraction: 0.76), value: visual.press)
+            .animation(visual.reduced ? nil : visual.dragging ?
+                .interactiveSpring(response: 0.16, dampingFraction: 0.88) :
+                .spring(response: 0.26, dampingFraction: 0.76), value: visual.pull)
+            .animation(visual.reduced ? nil : .smooth(duration: 0.18, extraBounce: 0), value: visual.hover)
+    }
+}
+
+/// 滑钮和挖空色区读取同一组插值姿态；内部绘制不再独立插值变换。
+private struct PanelSliderChrome: View, Animatable {
+    var progress: Double
+    let travel: CGFloat
+    let knobSize: CGSize
+    let trackHeight: CGFloat
+    let hovered: Bool
+    let dragging: Bool
+    let focused: Bool
+    let reduced: Bool
+    let enabled: Bool
+    var press: CGFloat
+    var pull: CGFloat
+    var hover: CGFloat
+    @Environment(\.displayScale) private var displayScale
+
+    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, CGFloat> {
+        get { AnimatablePair(AnimatablePair(press, pull), hover) }
+        set {
+            press = newValue.first.first
+            pull = newValue.first.second
+            hover = newValue.second
+        }
+    }
+
+    private var pressure: CGFloat { reduced ? 0 : min(max(press, 0), 1.12) }
+    private var direction: CGFloat { reduced ? 0 : min(max(pull, -1.05), 1.05) }
+    private var scaleX: CGFloat { 1 + (reduced ? 0 : hover) * 0.03 + pressure * 0.055 + abs(direction) * 0.04 }
+    private var scaleY: CGFloat { 1 + (reduced ? 0 : hover) * 0.03 - pressure * 0.045 - abs(direction) * 0.015 }
+    private var angle: CGFloat { direction * .pi / 90 }
+    private var lift: CGFloat { -pressure * 0.8 }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Color.clear
+                .modifier(PanelSliderClearGlass())
+                .frame(height: trackHeight)
+                .overlay {
+                    PanelSliderStarlight(reduced: reduced || !enabled,
+                                         active: hovered || dragging,
+                                         engaged: dragging || focused,
+                                         dragging: dragging, progress: progress)
+                        .frame(height: trackHeight)
+                        .mask {
+                            Rectangle()
+                                .frame(width: travel * progress + knobSize.width / 2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .clipShape(Capsule())
+                        .opacity(progress > 0 ? 1 : 0)
+                        .allowsHitTesting(false)
+                }
+                .mask {
+                    Canvas { context, size in
+                        context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.white))
+                        let center = CGPoint(x: travel * progress + knobSize.width / 2,
+                                             y: size.height / 2 + lift)
+                        let transform = CGAffineTransform(translationX: center.x, y: center.y)
+                            .rotated(by: angle)
+                            .scaledBy(x: scaleX, y: scaleY)
+                            .translatedBy(x: -knobSize.width / 2, y: -knobSize.height / 2)
+                        // 一物理像素覆盖抗锯齿交界，避免快拖时出现细小色边。
+                        let guardBand = 1 / max(displayScale, 1)
+                        let rect = CGRect(origin: .zero, size: knobSize).insetBy(dx: -guardBand, dy: -guardBand)
+                        let cutout = Path(roundedRect: rect, cornerRadius: knobSize.height / 2 + guardBand)
+                            .applying(transform)
+                        context.blendMode = .destinationOut
+                        context.fill(cutout, with: .color(.white))
+                    }
+                }
+            Color.clear
+                .modifier(PanelSliderClearGlass(drawsBorder: false))
+                .overlay {
+                    // 无色反光随牵引方向偏移，玻璃本体保持清透。
+                    Capsule().fill(LinearGradient(stops: [
+                        .init(color: .white.opacity(0.24), location: 0),
+                        .init(color: .clear, location: 0.38),
+                        .init(color: .clear, location: 0.72),
+                        .init(color: .black.opacity(0.045), location: 1)
+                    ], startPoint: UnitPoint(x: 0.25 + direction * 0.25, y: 0),
+                       endPoint: UnitPoint(x: 0.75 + direction * 0.15, y: 1)))
+                        .opacity(pressure)
+                        .allowsHitTesting(false)
+                }
+                .overlay {
+                    Capsule().strokeBorder(.white.opacity(focused ? 0.72 : hovered || dragging ? 0.58 : 0.38),
+                                            lineWidth: focused ? 0.9 : 0.55)
+                        .allowsHitTesting(false)
+                }
+                .frame(width: knobSize.width, height: knobSize.height)
+                .scaleEffect(x: scaleX, y: scaleY)
+                .rotationEffect(.radians(Double(angle)))
+                .offset(x: travel * progress, y: lift)
+        }
+        .transaction { $0.animation = nil }
+    }
+}
+
 /// 专用于通透滑条：不使用 palette 染色，轨道与滑钮始终为 clear 玻璃。
 private struct PanelSliderClearGlass: ViewModifier {
+    var drawsBorder = true
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
@@ -1146,10 +1286,12 @@ private struct PanelSliderClearGlass: ViewModifier {
             }
         }
         .overlay {
-            Capsule().strokeBorder(
-                LinearGradient(colors: [.white.opacity(0.78), .white.opacity(0.14), .white.opacity(0.44)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.65)
-                .allowsHitTesting(false)
+            if drawsBorder {
+                Capsule().strokeBorder(
+                    LinearGradient(colors: [.white.opacity(0.78), .white.opacity(0.14), .white.opacity(0.44)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.65)
+                    .allowsHitTesting(false)
+            }
         }
     }
 }
@@ -1162,6 +1304,8 @@ private struct PanelSliderStarlight: View {
     let dragging: Bool
     let progress: Double
     @StateObject private var particleClock = PanelSliderParticleClock()
+    private let champagneGold = Color(red: 1, green: 0.79, blue: 0.38)
+    private let paleGold = Color(red: 1, green: 0.87, blue: 0.58)
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduced)) { timeline in
@@ -1172,9 +1316,17 @@ private struct PanelSliderStarlight: View {
                 drawColorField(context: &context, size: size, time: time)
                 let wake = reduced ? 0 : particleClock.wake(at: timeline.date.timeIntervalSinceReferenceDate)
                 let feedback = reduced ? 0 : particleClock.feedback(at: timeline.date.timeIntervalSinceReferenceDate)
-                drawFlowDust(context: &context, size: size, time: particleTime, wake: wake, feedback: feedback)
-                for index in 0..<286 {
+                let goldBurst = reduced ? 0 : particleClock.dragActivity(at: timeline.date.timeIntervalSinceReferenceDate)
+                drawFlowDust(context: &context, size: size, time: particleTime, wake: wake, feedback: feedback,
+                             goldBurst: goldBurst)
+                // 固定粒子身份：拖动时新增的金星只淡入淡出，位置不会重新随机。
+                for index in 0..<526 {
+                    let extraGold = index >= 286
+                    if extraGold && goldBurst < 0.002 { continue }
                     let seed = Double(index)
+                    // 金色分布由固定种子决定；少数大亮星用浅金，细星尘用香槟金。
+                    let isGold = extraGold || (index % 31 == 0 ? index % 62 == 0 : random(seed + 911) < 0.22)
+                    let starTint = isGold ? (!extraGold && index % 31 == 0 ? paleGold : champagneGold) : Color.white
                     let base = random(seed + 1)
                     let direction = random(seed + 71) < 0.5 ? -1.0 : 1.0
                     let rate = 0.24 + random(seed + 137) * 0.83
@@ -1193,10 +1345,12 @@ private struct PanelSliderStarlight: View {
                     let point = CGPoint(x: 2 + u * max(size.width - 4, 1),
                                         y: 1.5 + v * max(size.height - 3, 1))
                     let pulse = reduced ? 0.75 : 0.68 + 0.32 * sin(particleTime * (0.65 + rate) + angle)
-                    let density = index % 31 == 0 ? 1.0 : index % 7 == 0 ? 0.78 : 0.56
+                    let density = extraGold ? 0.62 : index % 31 == 0 ? 1.0 : index % 7 == 0 ? 0.78 : 0.56
+                    let presence = extraGold ? goldBurst * (0.55 + 0.45 * random(seed + 947)) : 1
                     let opacity = min(1, ((active || engaged) ? 0.95 : 0.80) * pulse
-                                            + nearKnob * feedback * 0.55) * density
-                    let radius: CGFloat = index % 31 == 0 ? 0.60 : index % 7 == 0 ? 0.38 : 0.24
+                                            + nearKnob * feedback * 0.55) * density * presence
+                    let radius: CGFloat = extraGold ? (index % 9 == 0 ? 0.32 : 0.24) :
+                        index % 31 == 0 ? 0.60 : index % 7 == 0 ? 0.38 : 0.24
                     let halo = radius * (3.0 + nearKnob * feedback * 1.5)
                     let core = Path(ellipseIn: CGRect(x: point.x - radius, y: point.y - radius,
                                                      width: radius * 2, height: radius * 2))
@@ -1204,24 +1358,29 @@ private struct PanelSliderStarlight: View {
                     if index % 7 == 0 || nearKnob * feedback > 0.3 {
                         context.fill(Path(ellipseIn: CGRect(x: point.x - halo, y: point.y - halo,
                                                             width: halo * 2, height: halo * 2)),
-                                     with: .radialGradient(Gradient(colors: [.white.opacity(opacity * 0.24), .clear]),
+                                     with: .radialGradient(Gradient(colors: [starTint.opacity(opacity * 0.24), .clear]),
                                                            center: point, startRadius: 0, endRadius: halo))
                     }
-                    context.fill(core, with: .color(.white.opacity(opacity)))
-                    if index % 31 == 0 {
+                    context.fill(core, with: .color(starTint.opacity(opacity)))
+                    if !extraGold && index % 31 == 0 {
                         let ray: CGFloat = 1.15 + nearKnob * feedback * 0.45
                         var rays = Path()
                         rays.move(to: CGPoint(x: point.x - ray, y: point.y))
                         rays.addLine(to: CGPoint(x: point.x + ray, y: point.y))
                         rays.move(to: CGPoint(x: point.x, y: point.y - ray * 1.2))
                         rays.addLine(to: CGPoint(x: point.x, y: point.y + ray * 1.2))
-                        context.stroke(rays, with: .color(.white.opacity(opacity * 0.85)),
+                        context.stroke(rays, with: .color(starTint.opacity(opacity * 0.85)),
                                        style: StrokeStyle(lineWidth: 0.35, lineCap: .round))
                     }
                 }
             }
         }
-        .onChange(of: engaged, initial: true) { _, engaged in particleClock.setEngaged(engaged) }
+        .onChange(of: engaged, initial: true) { _, _ in
+            particleClock.setInteraction(engaged: engaged, dragging: dragging)
+        }
+        .onChange(of: dragging, initial: true) { _, _ in
+            particleClock.setInteraction(engaged: engaged, dragging: dragging)
+        }
         .onChange(of: progress, initial: true) { _, progress in particleClock.move(to: progress, dragging: dragging) }
         .accessibilityHidden(true)
     }
@@ -1236,10 +1395,13 @@ private struct PanelSliderStarlight: View {
         return wrapped <= 1 ? wrapped : 2 - wrapped
     }
 
-    private func drawFlowDust(context: inout GraphicsContext, size: CGSize, time: Double, wake: Double, feedback: Double) {
+    private func drawFlowDust(context: inout GraphicsContext, size: CGSize, time: Double, wake: Double, feedback: Double,
+                              goldBurst: Double) {
         let front = (size.width - 32) * progress
         // 短小流光散成星点簇，方向各异；近滑钮的星尘随拖动扬起。
-        for index in 0..<48 {
+        for index in 0..<80 {
+            let extraGold = index >= 48
+            if extraGold && goldBurst < 0.002 { continue }
             let seed = Double(index + 701)
             let rate = 0.3 + random(seed) * 0.9
             let phase = random(seed + 17) * .pi * 2
@@ -1249,11 +1411,13 @@ private struct PanelSliderStarlight: View {
             let angle = phase + 1.8 * sin(time * rate * 0.63 + phase)
             let length = 0.8 + random(seed + 43) * 1.4 + response * feedback * 1.8
             let point = CGPoint(x: x + wake * response * 65, y: y)
-            let opacity = 0.20 + 0.16 * (0.5 + 0.5 * sin(time * rate + phase)) + response * feedback * 0.30
+            let opacity = (0.20 + 0.16 * (0.5 + 0.5 * sin(time * rate + phase)) + response * feedback * 0.30)
+                * (extraGold ? goldBurst : 1)
             var spark = Path()
             spark.move(to: point)
             spark.addLine(to: CGPoint(x: point.x + cos(angle) * length, y: point.y + sin(angle) * length))
-            context.stroke(spark, with: .color(.white.opacity(opacity)),
+            let tint = extraGold || random(seed + 911) < 0.22 ? champagneGold : Color.white
+            context.stroke(spark, with: .color(tint.opacity(opacity)),
                            style: StrokeStyle(lineWidth: 0.40, lineCap: .round))
         }
         // 无色光脉冲只在滑钮旁短暂出现，反馈强度来自实际位移，反向拖动也有响应。
@@ -1273,29 +1437,30 @@ private struct PanelSliderStarlight: View {
         let rect = CGRect(origin: .zero, size: size)
         let width = max(24, (size.width - 32) * progress)
         let phase = time * 0.36
-        let blue = Color(red: 0.20, green: 0.49, blue: 1)
-        let periwinkle = Color(red: 0.49, green: 0.38, blue: 1)
-        let violet = Color(red: 0.61, green: 0.23, blue: 0.96)
+        let blue = Color(red: 0.04, green: 0.42, blue: 1)
+        let periwinkle = Color(red: 0.34, green: 0.20, blue: 1)
+        let violet = Color(red: 0.58, green: 0.08, blue: 0.98)
+        // 保留玻璃透底，使用更纯的色相而不是靠厚重实色提高亮度。
         context.fill(Path(rect), with: .linearGradient(
-            Gradient(colors: [blue.opacity(0.98), periwinkle, violet.opacity(0.98)]),
+            Gradient(colors: [blue.opacity(0.86), periwinkle.opacity(0.80), violet.opacity(0.86)]),
             startPoint: .zero, endPoint: CGPoint(x: width, y: size.height * 0.45)))
 
-        // 用有色透光层交织，避免大面积 screen 叠加把蓝紫洗成雾白。
+        // 交织色场收轻，避免大面积叠色遮住底层玻璃。
         let fields: [(Double, Double, Color)] = [
-            (0.08 + progress * 0.22 + 0.06 * sin(phase * 0.7), 0.9, Color(red: 0.10, green: 0.90, blue: 1)),
-            (0.25 + progress * 0.34 + 0.08 * sin(phase * 0.6 + 1.5), 0.1, Color(red: 0.83, green: 0.39, blue: 1)),
-            (0.50 + progress * 0.28 + 0.07 * sin(phase * 0.8 + 3), 0.85, Color(red: 0.22, green: 0.70, blue: 1))
+            (0.08 + progress * 0.22 + 0.06 * sin(phase * 0.7), 0.9, Color(red: 0.02, green: 0.85, blue: 1)),
+            (0.25 + progress * 0.34 + 0.08 * sin(phase * 0.6 + 1.5), 0.1, Color(red: 0.72, green: 0.16, blue: 1)),
+            (0.50 + progress * 0.28 + 0.07 * sin(phase * 0.8 + 3), 0.85, Color(red: 0.04, green: 0.65, blue: 1))
         ]
         var light = context
         light.blendMode = .normal
         for (x, y, color) in fields {
             let center = CGPoint(x: width * x, y: size.height * y)
             light.fill(Path(rect), with: .radialGradient(
-                Gradient(colors: [color.opacity(0.68), color.opacity(0.24), .clear]),
+                Gradient(colors: [color.opacity(0.44), color.opacity(0.12), .clear]),
                 center: center, startRadius: 0, endRadius: width * 0.34))
         }
 
-        // 宽而柔的交叠色带，再用细光线勾出玻璃内部的珠光层。
+        // 细窄有色色带交叠，少量亮线保留玻璃内部反光。
         for index in 0..<3 {
             let offset = Double(index) * 1.8
             let y0 = size.height * (0.5 + 0.32 * sin(phase + offset))
@@ -1306,17 +1471,17 @@ private struct PanelSliderStarlight: View {
                 control1: CGPoint(x: width * 0.33, y: size.height * (index == 1 ? 1.6 : -0.5)),
                 control2: CGPoint(x: width * 0.67, y: size.height * (index == 1 ? -0.5 : 1.6)))
             var glow = context
-            glow.blendMode = .screen
-            glow.addFilter(.blur(radius: 1.25))
-            let color = index == 1 ? Color(red: 0.24, green: 0.93, blue: 1) : Color(red: 0.79, green: 0.48, blue: 1)
-            glow.stroke(ribbon, with: .color(color.opacity(0.30)), lineWidth: 3.5)
-            context.stroke(ribbon, with: .color(.white.opacity(index == 1 ? 0.18 : 0.11)),
+            glow.blendMode = .normal
+            glow.addFilter(.blur(radius: 0.65))
+            let color = index == 1 ? Color(red: 0.04, green: 0.91, blue: 1) : Color(red: 0.66, green: 0.25, blue: 1)
+            glow.stroke(ribbon, with: .color(color.opacity(0.26)), lineWidth: 2.8)
+            context.stroke(ribbon, with: .color(.white.opacity(index == 1 ? 0.06 : 0.035)),
                            style: StrokeStyle(lineWidth: 0.55, lineCap: .round))
         }
         context.fill(Path(rect), with: .linearGradient(
-            Gradient(stops: [.init(color: .white.opacity(0.10), location: 0),
-                             .init(color: .clear, location: 0.26),
-                             .init(color: Color(red: 0.20, green: 0.16, blue: 0.47).opacity(0.08), location: 1)]),
+            Gradient(stops: [.init(color: .white.opacity(0.025), location: 0),
+                             .init(color: .clear, location: 0.22),
+                             .init(color: Color(red: 0.12, green: 0.08, blue: 0.40).opacity(0.015), location: 1)]),
             startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
     }
 }
@@ -1327,7 +1492,10 @@ private final class PanelSliderParticleClock: ObservableObject {
     private var anchorPhase = 0.0
     private var sourceSpeed = 1.0
     private var targetSpeed = 1.0
-    private let rampDuration = 0.40
+    private var rampDuration = 0.40
+    private var dragTime = Date.timeIntervalSinceReferenceDate
+    private var dragSource = 0.0
+    private var dragTarget = 0.0
     private var lastProgress: Double?
     private var wakeTime = Date.timeIntervalSinceReferenceDate
     private var wakeStrength = 0.0
@@ -1343,15 +1511,28 @@ private final class PanelSliderParticleClock: ObservableObject {
         return anchorPhase + ramp + targetSpeed * max(0, elapsed - rampDuration)
     }
 
-    func setEngaged(_ engaged: Bool) {
-        let speed = engaged ? 3.2 : 1.0
-        guard speed != targetSpeed else { return }
+    func setInteraction(engaged: Bool, dragging: Bool) {
         let now = Date.timeIntervalSinceReferenceDate
+        let nextDragTarget = dragging ? 1.0 : 0.0
+        if dragTarget != nextDragTarget {
+            dragSource = dragActivity(at: now)
+            dragTarget = nextDragTarget
+            dragTime = now
+        }
+        let speed = dragging ? 7.2 : engaged ? 3.2 : 1.0
+        guard speed != targetSpeed else { return }
         let u = min(max((now - anchorTime) / rampDuration, 0), 1)
         anchorPhase = phase(at: now)
         sourceSpeed += (targetSpeed - sourceSpeed) * u * u * (3 - 2 * u)
         targetSpeed = speed
         anchorTime = now
+        rampDuration = dragging ? 0.14 : 0.40
+    }
+
+    func dragActivity(at time: Double) -> Double {
+        let duration = dragTarget > dragSource ? 0.10 : 0.45
+        let u = min(max((time - dragTime) / duration, 0), 1)
+        return dragSource + (dragTarget - dragSource) * u * u * (3 - 2 * u)
     }
 
     func move(to progress: Double, dragging: Bool) {

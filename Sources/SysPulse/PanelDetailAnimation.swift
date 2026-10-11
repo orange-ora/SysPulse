@@ -274,7 +274,7 @@ struct PanelDetailSection: NSViewRepresentable {
     let animation: PanelDetailAnimation
     let expanded: Bool
     let reduceMotion: Bool
-    let detail: AnyView
+    let detail: () -> AnyView
     let tail: AnyView
 
     func makeNSView(context: Context) -> PanelDetailSectionView {
@@ -284,8 +284,8 @@ struct PanelDetailSection: NSViewRepresentable {
     }
 
     func updateNSView(_ view: PanelDetailSectionView, context: Context) {
-        view.update(detail: AnyView(detail.environment(\.self, context.environment)
-                                      .accessibilityHidden(!expanded).allowsHitTesting(expanded)),
+        view.update(detail: { AnyView(detail().environment(\.self, context.environment)
+                                      .accessibilityHidden(!expanded).allowsHitTesting(expanded)) },
                     tail: AnyView(tail.environment(\.self, context.environment)),
                     expanded: expanded, reduced: reduceMotion)
     }
@@ -307,7 +307,8 @@ final class PanelDetailSectionView: NSView {
     private let tailController = NSHostingController(rootView: AnyView(EmptyView()))
     private let detailClip = PanelDetailClipView(frame: .zero)
     private let tailWrapper = PanelDetailFlippedView(frame: .zero)
-    private var detailHeight: CGFloat = 0
+    private var hasLoadedDetail = false
+    private var detailHeight: CGFloat = 1
     private var tailHeight: CGFloat = 0
     private var visibleOffset: CGFloat = 0
     private var visibleAlpha: CGFloat = 0
@@ -344,14 +345,18 @@ final class PanelDetailSectionView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
-    func update(detail: AnyView, tail: AnyView, expanded: Bool, reduced: Bool) {
-        detailController.rootView = detail
+    func update(detail: () -> AnyView, tail: AnyView, expanded: Bool, reduced: Bool) {
         tailController.rootView = tail
         let maximum = NSSize(width: 332, height: CGFloat.greatestFiniteMagnitude)
-        let measuredDetail = detailController.sizeThatFits(in: maximum)
-        let measuredTail = tailController.sizeThatFits(in: maximum)
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        detailHeight = ceil(measuredDetail.height * scale) / scale
+        // 首次折叠时不创建 CPU 明细；展开后保留它，供收束和中途反向使用。
+        if expanded || hasLoadedDetail {
+            detailController.rootView = detail()
+            let measuredDetail = detailController.sizeThatFits(in: maximum)
+            detailHeight = ceil(measuredDetail.height * scale) / scale
+            hasLoadedDetail = true
+        }
+        let measuredTail = tailController.sizeThatFits(in: maximum)
         tailHeight = ceil(measuredTail.height * scale) / scale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
