@@ -19,6 +19,7 @@ final class NSScreen {
     var auxiliaryTopRightArea: NSRect? = NSRect(x: 948, y: 0, width: 762, height: 24)
 }
 final class FakeWindow {
+    var backingScaleFactor: CGFloat = 2
     var frame = NSRect(x: 1071, y: 0, width: 122, height: 24)
     var screen: NSScreen? = NSScreen.shared
 }

@@ -153,7 +153,14 @@ func accessibilityElements(_ object: Any, depth: Int = 0) -> [NSObject] {
 }
 
 func press(_ label: String, in hosting: NSView) {
-    let elements = accessibilityElements(hosting)
+    let elements = accessibilityElements(hosting.window as Any) + accessibilityElements(hosting)
+    let axRows = elements.map { element in
+        ["label": accessibilityAttribute(element, "accessibilityLabel") as? String ?? "",
+         "identifier": accessibilityAttribute(element, "accessibilityIdentifier") as? String ?? "",
+         "frame": NSStringFromRect((element as? NSAccessibilityProtocol)?.accessibilityFrame() ?? .zero)]
+    }
+    try? JSONSerialization.data(withJSONObject: axRows, options: [.prettyPrinted, .sortedKeys])
+        .write(to: output.appendingPathComponent("interaction-ax-tree.json"))
     if let object = elements.first(where: {
         accessibilityAttribute($0, "accessibilityLabel") as? String == label
     }), let element = object as? NSAccessibilityProtocol, element.accessibilityPerformPress() {
@@ -162,13 +169,13 @@ func press(_ label: String, in hosting: NSView) {
     }
     let point: NSPoint
     switch label {
-    case "菜单栏显示网速": point = NSPoint(x: 88, y: hosting.bounds.height - 117)
+    case "菜单栏显示网速": point = NSPoint(x: 88, y: hosting.bounds.height - 67)
     case "打开显示与外观设置": point = NSPoint(x: 333, y: 43)
     case "刷新频率，2 秒": point = NSPoint(x: 222, y: 91)
     case "菜单栏排版，双行": point = NSPoint(x: 222, y: 160)
-    case "菜单栏光效，光晕": point = NSPoint(x: 236, y: hosting.bounds.height - 70)
-    case "菜单栏光效，炫彩": point = NSPoint(x: 311, y: hosting.bounds.height - 70)
-    case "玻璃通透": point = NSPoint(x: 337, y: 224)
+    case "菜单栏背景，光晕": point = NSPoint(x: 222, y: 231)
+    case "菜单栏背景，星点": point = NSPoint(x: 304, y: 231)
+    case "玻璃通透": point = NSPoint(x: 337, y: 299)
     case "恢复显示默认值": point = NSPoint(x: 180, y: hosting.bounds.height - 29)
     case "返回指标面板": point = NSPoint(x: 25, y: 26)
     default: fail("unknown native control \(label)")
@@ -192,12 +199,12 @@ func interactionCheck(_ hosting: NSView, completion: @escaping () -> Void) {
     press("菜单栏显示网速", in: hosting)
     guard preferences.showNetwork != original else { fail("network toggle did not update preference") }
     press("菜单栏显示网速", in: hosting)
-    press("菜单栏光效，光晕", in: hosting)
-    guard preferences.menuBarEffect == .diffuse else { fail("overview effect choice") }
-    press("菜单栏光效，炫彩", in: hosting)
-    guard preferences.menuBarEffect == .iridescent else { fail("overview iridescent effect choice") }
     press("打开显示与外观设置", in: hosting)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        press("菜单栏背景，光晕", in: hosting)
+        guard preferences.menuBarEffect == .diffuse else { fail("settings glow effect choice") }
+        press("菜单栏背景，星点", in: hosting)
+        guard preferences.menuBarEffect == .iridescent else { fail("settings star effect choice") }
         press("刷新频率，2 秒", in: hosting)
         guard preferences.refreshInterval == 2 else { fail("refresh segmented choice") }
         press("菜单栏排版，双行", in: hosting)

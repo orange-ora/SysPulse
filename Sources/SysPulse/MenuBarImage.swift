@@ -208,11 +208,62 @@ enum MenuBarImage {
         return image
     }
 
+    private struct FrozenStarKey: Equatable {
+        let size: NSSize
+        let appearance: String
+        let foreground: ObjectIdentifier?
+        let stars: Bool
+        let silks: Bool
+        let scale: CGFloat
+    }
+    private static var frozenStarKey: FrozenStarKey?
+    private static var frozenStarImage: NSImage?
+    private static var frozenStarForeground: NSImage?
+
     static func background(size: NSSize, appearance: NSAppearance?, effect: MenuBarEffect,
                            elapsed: Double?, foreground: NSImage? = nil, includesStars: Bool = true,
-                           includesSilks: Bool = true) -> NSImage? {
+                           includesSilks: Bool = true, backingScale: CGFloat = 2) -> NSImage? {
         guard effect != .off, size.width.isFinite, size.height.isFinite,
               size.width > 0, size.height > 0 else { return nil }
+        if effect == .iridescent {
+            // 菜单栏副本与正常合成会分别读取图片；先生成一次位图，避免重复绘制微粒。
+            let scale = backingScale.isFinite ? max(1, backingScale) : 2
+            let time = elapsed.flatMap { $0.isFinite ? $0 : nil } ?? 0
+            let frozenKey = time == 0 ? FrozenStarKey(size: size,
+                appearance: (appearance ?? NSAppearance.currentDrawing()).name.rawValue,
+                foreground: foreground.map { ObjectIdentifier($0) },
+                stars: includesStars, silks: includesSilks, scale: scale) : nil
+            if let frozenKey, frozenStarKey == frozenKey, let frozenStarImage { return frozenStarImage }
+            let width = Int(ceil(size.width * scale))
+            let height = Int(ceil(size.height * scale))
+            guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32),
+                  let bytes = bitmap.bitmapData,
+                  let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+            bytes.initialize(repeating: 0, count: width * height * 4)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            context.cgContext.scaleBy(x: scale, y: scale)
+            let draw = {
+                drawEffect(size: size, appearance: appearance, effect: effect, elapsed: elapsed,
+                           foreground: foreground, includesStars: includesStars, includesSilks: includesSilks)
+            }
+            if let appearance { appearance.performAsCurrentDrawingAppearance(draw) }
+            else { draw() }
+            context.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+            bitmap.size = size
+            let image = NSImage(size: size)
+            image.addRepresentation(bitmap)
+            image.isTemplate = false
+            if let frozenKey {
+                frozenStarKey = frozenKey
+                frozenStarImage = image
+                frozenStarForeground = foreground
+            }
+            return image
+        }
         let image = NSImage(size: size, flipped: false) { _ in
             let draw = {
                 drawEffect(size: size, appearance: appearance, effect: effect, elapsed: elapsed,
@@ -293,6 +344,43 @@ enum MenuBarImage {
         cachedStarMaskSource = foreground
         cachedStarMask = mask
         return mask
+    }
+
+    private struct LiquidStar {
+        let rate: Double
+        let phase: Double
+        let amplitudeX: Double
+        let originX: Double
+        let originY: Double
+        let radius: CGFloat
+        let color: CGColor
+    }
+    private static var cachedLiquidStarCount = 0
+    private static var cachedLiquidStars: [LiquidStar] = []
+
+    private static func liquidStars(count: Int) -> [LiquidStar] {
+        if count == cachedLiquidStarCount { return cachedLiquidStars }
+        func random(_ seed: Double) -> Double {
+            let value = sin(seed * 127.1 + 311.7) * 43758.5453
+            return value - floor(value)
+        }
+        let extraGoldCount = max(40, count / 6)
+        let gold = NSColor(calibratedRed: 1, green: 0.84, blue: 0.50, alpha: 1)
+        // 参数只随候选数变化，缓存限于当前排版，不累积历史尺寸。
+        cachedLiquidStars = (0..<(count + extraGoldCount)).compactMap { index in
+            guard index % 4 != 3 else { return nil }
+            let seed = Double(index)
+            let radius: CGFloat = index % 17 == 0 ? 0.50 : index % 5 == 0 ? 0.36 : 0.24
+            let alpha: CGFloat = index % 17 == 0 ? 0.68 : index % 5 == 0 ? 0.55 : 0.43
+            let tint = index >= count || random(seed + 911) < 0.22 ? gold : NSColor.white
+            return LiquidStar(rate: 0.24 + random(seed + 137) * 0.36,
+                              phase: random(seed + 293) * .pi * 2,
+                              amplitudeX: 0.012 + random(seed + 409) * 0.022,
+                              originX: random(seed + 1), originY: random(seed + 71),
+                              radius: radius, color: tint.withAlphaComponent(alpha).cgColor)
+        }
+        cachedLiquidStarCount = count
+        return cachedLiquidStars
     }
 
     /// 五缕短而细的挑染，端部自然淡出；不发光，也不做横向扫动。
@@ -383,38 +471,25 @@ enum MenuBarImage {
             cg.beginTransparencyLayer(auxiliaryInfo: nil)
             if includesSilks { drawLiquidSilks(in: cg, size: size, dark: dark) }
             if includesStars {
-                func random(_ seed: Double) -> Double {
-                    let value = sin(seed * 127.1 + 311.7) * 43758.5453
-                    return value - floor(value)
-                }
                 func reflected(_ value: Double) -> Double {
                     let wrapped = value - floor(value / 2) * 2
                     return wrapped <= 1 ? wrapped : 2 - wrapped
                 }
                 let count = max(240, Int(size.width * size.height / 5.6))
-                let extraGoldCount = max(40, count / 6)
-                let gold = NSColor(calibratedRed: 1, green: 0.84, blue: 0.50, alpha: 1)
-                // 均匀移除四分之一，保留剩余星点的身份、金白比例与散动速度。
-                for index in 0..<(count + extraGoldCount) where index % 4 != 3 {
-                    let seed = Double(index)
-                    let rate = 0.24 + random(seed + 137) * 0.36
-                    let phase = random(seed + 293) * .pi * 2
-                    let angle = time * rate + phase
-                    // 固定身份、各自的速度和轨迹；散动没有共同方向，也不改变亮度。
-                    let driftX = (0.012 + random(seed + 409) * 0.022) * sin(angle)
+                let spanX = max(size.width - 3, 1)
+                let spanY = max(size.height - 3, 1)
+                for star in liquidStars(count: count) {
+                    let rate = star.rate
+                    let phase = star.phase
+                    let driftX = star.amplitudeX * sin(time * rate + phase)
                                + 0.012 * sin(time * (rate * 1.37) - phase * 1.8)
                     let driftY = 0.13 * sin(time * (rate * 0.71) + phase * 1.7)
                                + 0.07 * sin(time * (rate * 1.31) - phase)
-                    let u = reflected(random(seed + 1) + driftX)
-                    let v = reflected(random(seed + 71) + driftY)
-                    let point = CGPoint(x: 1.5 + u * max(size.width - 3, 1),
-                                        y: 1.5 + v * max(size.height - 3, 1))
-                    let dotRadius: CGFloat = index % 17 == 0 ? 0.50 : index % 5 == 0 ? 0.36 : 0.24
-                    let alpha: CGFloat = index % 17 == 0 ? 0.68 : index % 5 == 0 ? 0.55 : 0.43
-                    let tint = index >= count || random(seed + 911) < 0.22 ? gold : NSColor.white
-                    cg.setFillColor(tint.withAlphaComponent(alpha).cgColor)
-                    cg.fillEllipse(in: CGRect(x: point.x - dotRadius, y: point.y - dotRadius,
-                                              width: dotRadius * 2, height: dotRadius * 2))
+                    let point = CGPoint(x: 1.5 + reflected(star.originX + driftX) * spanX,
+                                        y: 1.5 + reflected(star.originY + driftY) * spanY)
+                    cg.setFillColor(star.color)
+                    cg.fillEllipse(in: CGRect(x: point.x - star.radius, y: point.y - star.radius,
+                                              width: star.radius * 2, height: star.radius * 2))
                 }
             }
             if let exclusion {

@@ -996,6 +996,68 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         print("Liquid star glass production previews: \(previewDirectory.path)")
     }
 
+    static func starBitmapFrames() {
+        let size = NSSize(width: 107, height: 18.5)
+        func foreground() -> NSImage {
+            NSImage(size: size, flipped: false) { _ in
+                NSAttributedString(string: "CPU 42", attributes: [.font: NSFont.systemFont(ofSize: 11)])
+                    .draw(at: NSPoint(x: 3, y: 2))
+                return true
+            }
+        }
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = NSAppearance(named: name)!
+            for scale in [CGFloat(1), 2, 3] {
+                let glyph = foreground()
+                let context = NSGraphicsContext.current
+                func frame(_ time: Double?, foreground: NSImage? = nil,
+                           stars: Bool = true, silks: Bool = true) -> NSImage {
+                    MenuBarImage.background(size: size, appearance: appearance, effect: .iridescent,
+                        elapsed: time, foreground: foreground ?? glyph, includesStars: stars,
+                        includesSilks: silks, backingScale: scale)!
+                }
+                let frozen = frame(0)
+                let bitmap = frozen.representations.first as? NSBitmapImageRep
+                let label = "star bitmap \(name.rawValue)/\(scale)x"
+                check(bitmap != nil && frozen.representations.count == 1 && !frozen.isTemplate,
+                      "\(label): eagerly owns one non-template bitmap")
+                check(bitmap?.pixelsWide == Int(ceil(size.width * scale)) &&
+                      bitmap?.pixelsHigh == Int(ceil(size.height * scale)) && frozen.size == size,
+                      "\(label): native pixels follow backing scale and preserve logical size")
+                check(frame(0) === frozen, "\(label): stationary frames reuse the same image")
+                check([nil, Double.nan, Double.infinity, -Double.infinity].allSatisfy { frame($0) === frozen },
+                      "\(label): absent and invalid times reuse valid time-zero pixels")
+                let moving = frame(1.2)
+                let later = frame(8.7)
+                check(moving !== frozen && later !== moving && moving.tiffRepresentation != later.tiffRepresentation,
+                      "\(label): animated frames continue moving independently of frozen cache")
+                check(frame(0) === frozen, "\(label): animation does not corrupt the stationary frame")
+                let otherGlyph = foreground()
+                check(frame(0, foreground: otherGlyph) !== frozen,
+                      "\(label): a new foreground invalidates the protected stationary background")
+                let withoutStars = frame(0, stars: false)
+                check(frame(0, stars: false) === withoutStars && frame(0) !== withoutStars,
+                      "\(label): particle switches invalidate and then reuse the correct frame")
+                let withoutSilks = frame(0, silks: false)
+                check(frame(0, silks: false) === withoutSilks && frame(0) !== withoutSilks,
+                      "\(label): silk switches invalidate and then reuse the correct frame")
+                let otherAppearance = NSAppearance(named: name == .aqua ? .darkAqua : .aqua)!
+                let restored = frame(0)
+                let recolored = MenuBarImage.background(size: size, appearance: otherAppearance,
+                    effect: .iridescent, elapsed: 0, foreground: glyph, backingScale: scale)!
+                check(recolored !== restored && recolored.tiffRepresentation != restored.tiffRepresentation,
+                      "\(label): changing appearance invalidates the frozen colors")
+                let rescaled = MenuBarImage.background(size: size, appearance: otherAppearance,
+                    effect: .iridescent, elapsed: 0, foreground: glyph, backingScale: scale + 1)!
+                check(rescaled !== recolored &&
+                      (rescaled.representations.first as? NSBitmapImageRep)?.pixelsWide == Int(ceil(size.width * (scale + 1))),
+                      "\(label): changing backing scale invalidates native pixel dimensions")
+                check(NSGraphicsContext.current === context,
+                      "\(label): eager rendering restores the caller graphics context")
+            }
+        }
+    }
+
     static func installationIdentity() {
         func canonical(_ path: String) -> Bool {
             SingleInstance.isCanonicalInstallation(URL(fileURLWithPath: path))
@@ -1014,6 +1076,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         if CommandLine.arguments.contains("--menu-effects-only") {
             displayPreferences()
             starGlass()
+            starBitmapFrames()
             print("\n\(passed) focused menu effect assertions passed.")
             return
         }
@@ -1032,6 +1095,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
         hostReferences()
         processCount()
         starGlass()
+        starBitmapFrames()
         installationIdentity()
         panelContentSizing()
         print("\n\(passed) regression assertions passed. No GUI app installation or real login-item changes.")

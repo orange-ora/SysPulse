@@ -70,11 +70,11 @@ private func nativeTrackingEvent(_ view: NSView, _ point: NSPoint) {
 @MainActor
 private func verifyHover(_ tag: String, _ name: String, at point: NSPoint, region: NSRect,
                          quiet: NSRect, host: NSView) async {
-    // 星点在普通模式持续流动，悬停与复原只比较滑钮上沿（轨道从 y=220 开始）。
+    // 星点在普通模式持续流动，悬停与复原只比较滑钮上沿（16pt 轨道从 y=291 开始）。
     // 此处仍要求真实悬停变化和静态复原，不能用粒子本身的运动冒充反馈。
     let comparisonRegion = name == "slider" && !probeReducedMotion
         ? NSRect(x: 14 + 300 * CGFloat(preferences.panelTransparency) - 3,
-                 y: 214, width: 38, height: 6)
+                 y: 285, width: 38, height: 5)
         : region
     hover(host, NSPoint(x: -20, y: 390))
     await settle()
@@ -105,17 +105,17 @@ private func verifyHover(_ tag: String, _ name: String, at point: NSPoint, regio
 private func verifyMagneticEdges(_ tag: String, reduced: Bool, panel: PanelContentController, host: NSView) async {
     let bounds = host.bounds
     let natural = panel.naturalContentSize
-    let card = NSRect(x: 14, y: 67.5, width: 162, height: 136)
+    let card = NSRect(x: 14, y: 86.5, width: 162, height: 136)
     let region = card.insetBy(dx: -2, dy: -2)
     let quiet = NSRect(x: 210, y: 260, width: 60, height: 30)
     hover(host, NSPoint(x: -20, y: 390))
     await settle(0.55)
     let idle = bodyBitmap(host, name: tag + "-magnet-idle")
     var first: NSBitmapImageRep?
-    for (name, point) in [("top", NSPoint(x: card.midX, y: card.minY + 2)),
-                          ("bottom", NSPoint(x: card.midX, y: card.maxY - 2)),
-                          ("left", NSPoint(x: card.minX + 2, y: card.midY)),
-                          ("right", NSPoint(x: card.maxX - 2, y: card.midY)),
+    for (name, point) in [("top", NSPoint(x: card.midX, y: card.minY + 4)),
+                          ("bottom", NSPoint(x: card.midX, y: card.maxY - 4)),
+                          ("left", NSPoint(x: card.minX + 4, y: card.midY)),
+                          ("right", NSPoint(x: card.maxX - 4, y: card.midY)),
                           ("top-left", NSPoint(x: card.minX + 8, y: card.minY + 8)),
                           ("top-right", NSPoint(x: card.maxX - 8, y: card.minY + 8)),
                           ("bottom-left", NSPoint(x: card.minX + 8, y: card.maxY - 8)),
@@ -127,8 +127,11 @@ private func verifyMagneticEdges(_ tag: String, reduced: Bool, panel: PanelConte
               tag + " magnetic " + name + " keeps native glass free of black blocks")
         check(difference(idle, rendered, rect: quiet, size: bounds.size) == 0,
               tag + " magnetic " + name + " leaves neighboring cards unchanged")
+        check(difference(idle, rendered, rect: region, size: bounds.size) > 0.0001,
+              tag + " magnetic " + name + " actually activates hover within the visible card edge")
         if let first {
             let diff = difference(first, rendered, rect: region, size: bounds.size)
+            print("MAGNET-PIXELS \(tag) \(name): directional=\(diff) reduced=\(reduced)")
             check(reduced ? diff < 0.002 : diff > 0.0001,
                   tag + " magnetic " + name + (reduced ? " stays centered with reduced motion" : " responds to its pointer edge"))
         } else {
@@ -177,7 +180,7 @@ private func verifyChromeHover(_ tag: String, reduced: Bool, panel: PanelContent
     let natural = panel.naturalContentSize
     for (name, card, ink) in [
         ("header", NSRect(x: 14, y: 14, width: 332, height: 41.5), NSRect(x: 34, y: 15, width: 180, height: 22)),
-        ("footer", NSRect(x: 14, y: 531.5, width: 332, height: 32), NSRect(x: 36, y: 533, width: 230, height: 28))
+        ("footer", NSRect(x: 14, y: bounds.height - 35, width: 332, height: 32), NSRect(x: 36, y: bounds.height - 33.5, width: 230, height: 28))
     ] {
         hover(host, NSPoint(x: -20, y: 390))
         await settle(0.55)
@@ -196,7 +199,7 @@ private func verifyChromeHover(_ tag: String, reduced: Bool, panel: PanelContent
             check(abs(heldShift) < 0.1,
                   tag + " " + name + " stationary pointer keeps foreground still \(sample)")
         }
-        let control = name == "header" ? NSRect(x: 318, y: 11, width: 30, height: 30) : NSRect(x: 292, y: 539, width: 54, height: 20)
+        let control = name == "header" ? NSRect(x: 318, y: 11, width: 30, height: 30) : NSRect(x: 292, y: bounds.height - 27.5, width: 54, height: 20)
         check(darkFraction(right, rect: control, size: bounds.size) < 0.10,
               tag + " " + name + " child glass button remains readable")
         let shift = inkCenterX(right, rect: ink, size: bounds.size) - inkCenterX(left, rect: ink, size: bounds.size)
@@ -589,7 +592,7 @@ private func controllerChecks() async {
     let roots = allViews(glass).compactMap(\.layer)
     check(roots.flatMap(allLayers).allSatisfy { $0.shadowOpacity == 0 },
           "actual liquid star glass hierarchy has no active depth shadow")
-    await verifyDisabledStatusOptics(glass)
+    await verifyStatusHover(glass)
     shared.menuBarEffect = .off
     await settle(0.2)
     let disabled: NSView? = reflected(controller, "statusGlassView")
@@ -692,26 +695,69 @@ private func verifyFilmDuringPresentation(_ name: String, controller: StatusItem
 }
 
 @MainActor
-private func verifyDisabledStatusOptics(_ glass: NSView) async {
+private func verifyStatusHover(_ glass: NSView, reduced: Bool = false) async {
     let bounds = glass.bounds
     guard let glyphs: NSImageView = reflected(glass, "imageView"),
-          let content = glyphs.superview else { fail("liquid star glass foreground") }
+          let film: NSImageView = reflected(glass, "backgroundImageView"),
+          let content = glyphs.superview, let layer = content.layer,
+          let window = glass.window else { fail("liquid star glass hover hierarchy") }
     let foreground = glyphs.image
-    nativeTrackingEvent(glass, NSPoint(x: glass.bounds.width * 0.25, y: glass.bounds.midY))
-    await settle(0.20)
-    nativeTrackingEvent(glass, NSPoint(x: glass.bounds.width * 0.75, y: glass.bounds.midY))
-    await settle(0.20)
+    let tag = reduced ? "reduced liquid star glass" : "liquid star glass"
+    let enabled: Bool = reflected(glass, "hoverEnabled") ?? false
+    check(enabled && !glass.trackingAreas.isEmpty, tag + " installs active native mouse tracking")
+    nativeTrackingEvent(glass, NSPoint(x: bounds.width * 0.25, y: bounds.height * 0.25))
+    await settle(0.25)
+    let left = layer.transform
+    nativeTrackingEvent(glass, NSPoint(x: bounds.width * 0.75, y: bounds.height * 0.75))
+    await settle(0.25)
+    let right = layer.transform
     let reflection: CAGradientLayer? = reflected(glass, "hoverReflection")
     let edge: CAGradientLayer? = reflected(glass, "hoverHighlight")
-    let enabled: Bool = reflected(glass, "hoverEnabled") ?? false
-    check(!enabled && glass.trackingAreas.isEmpty && (reflection?.opacity ?? 0) == 0 && (edge?.opacity ?? 0) == 0,
-          "liquid star glass installs no hover tracking or bright reflection layers")
-    check(CATransform3DIsIdentity(content.layer!.transform) &&
-          CATransform3DIsIdentity(content.layer!.presentation()?.transform ?? content.layer!.transform),
-          "liquid star glass has no pointer tilt or animated foreground transform")
-    check(glass.bounds == bounds && glyphs.image === foreground &&
-          glass.hitTest(NSPoint(x: bounds.midX, y: bounds.midY)) == nil,
-          "native pointer events preserve cached foreground and system button hit geometry")
+    check(reflection?.opacity == 1 && edge?.opacity == 1,
+          tag + " enables its native reflection and edge highlight on hover")
+    check(reduced ? CATransform3DIsIdentity(left) && CATransform3DIsIdentity(right) :
+          !CATransform3DIsIdentity(left) && !CATransform3DIsIdentity(right) &&
+          left.m13 * right.m13 < 0 && left.m23 * right.m23 < 0,
+          tag + (reduced ? " centers both pointer directions without spatial tilt" : " reverses pitch and yaw with pointer direction"))
+    func submittedPixels(_ image: CGImage?) -> Data? {
+        image.flatMap { NSBitmapImageRep(cgImage: $0).representation(using: .png, properties: [:]) }
+    }
+    func submittedImage() -> CGImage? {
+        guard let contents = film.layer?.contents,
+              CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else { return nil }
+        let image = contents as! CGImage
+        return image
+    }
+    func matchesSubmittedFrame() -> Bool {
+        guard let source = (film.image?.representations.first as? NSBitmapImageRep)?.cgImage,
+              let submitted = submittedImage() else { return false }
+        return source.width == submitted.width && source.height == submitted.height &&
+            submittedPixels(source) == submittedPixels(submitted)
+    }
+    let frame = film.image
+    let pixels = frame?.tiffRepresentation
+    let firstSubmitted = submittedPixels(submittedImage())
+    check(matchesSubmittedFrame(), tag + " submits the current source bitmap to the background layer")
+    await settle(0.30)
+    check(reduced ? film.image?.tiffRepresentation == pixels :
+          film.image !== frame && pixels != nil && film.image?.tiffRepresentation != pixels,
+          tag + (reduced ? " keeps the film static during hover" : " continues changing source star frames during held hover"))
+    let secondSubmitted = submittedPixels(submittedImage())
+    check(matchesSubmittedFrame() && firstSubmitted != nil && secondSubmitted != nil &&
+          (reduced ? firstSubmitted == secondSubmitted : firstSubmitted != secondSubmitted),
+          tag + (reduced ? " keeps submitted background pixels static across ticks" : " submits changed star pixels across multiple frame times"))
+    check(CATransform3DEqualToTransform(right, layer.transform) && glyphs.image === foreground &&
+          glass.bounds == bounds && glass.hitTest(NSPoint(x: bounds.midX, y: bounds.midY)) == nil,
+          tag + " frame ticks preserve held tilt, cached foreground and native button hit geometry")
+    guard let event = NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+        context: nil, eventNumber: 1, clickCount: 0, pressure: 0) else { fail("hover exit event") }
+    glass.mouseExited(with: event)
+    await settle(0.30)
+    check(CATransform3DIsIdentity(layer.transform) &&
+          CATransform3DIsIdentity(layer.presentation()?.transform ?? layer.transform) &&
+          reflection?.opacity == 0 && edge?.opacity == 0,
+          tag + " pointer exit restores neutral transform and removes highlights")
 }
 
 @MainActor
@@ -785,7 +831,7 @@ private func verifyNativeBackgroundSwitching(controller: StatusItemController, b
                       (material as? NSGlassEffectView)?.tintColor == nil,
                       "returning to liquid glass retains its clear untinted native material")
             }
-            await verifyDisabledStatusOptics(root)
+            await verifyStatusHover(root)
         } else {
             check(background === material && content.subviews.count == 2 &&
                   content.subviews[0] === background && content.subviews[1] === glyphs,
@@ -906,7 +952,7 @@ private func verifyIridescentFilm() async {
     await settle(0.35)
     if let currentSamplingTimer: Timer = reflected(sampler, "timer") { currentSamplingTimer.invalidate() }
     await settle(0.05)
-    await verifyDisabledStatusOptics(glass)
+    await verifyStatusHover(glass)
     probeReducedMotion = true
     NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
     await settle(0.25)
@@ -916,6 +962,7 @@ private func verifyIridescentFilm() async {
                                           effect: .iridescent, elapsed: 0, foreground: glyphs.image)?.tiffRepresentation
     check(staticFilm != nil && film.image?.tiffRepresentation == staticFilm && staticFilm == expected,
           "Reduce Motion retains a stable time-zero glass film across background clock ticks")
+    await verifyStatusHover(glass, reduced: true)
     check(CATransform3DIsIdentity(content.layer!.transform),
           "Reduce Motion centers the native glass without pointer tilt")
     probeReducedMotion = false
@@ -1194,7 +1241,7 @@ private func verifyDetailHandoff(panel: PanelContentController, host: NSView, ov
     await settle(0.08)
     press("打开显示与外观设置", in: host)
     await settle(0.35)
-    check(panel.naturalContentSize.height < overview - 100, "settings click during detail expansion yields native window ownership")
+    check(abs(panel.naturalContentSize.height - 461.5) < 0.5 && panel.naturalContentSize.height < overview, "settings click during detail expansion yields native window ownership")
     press("返回指标面板", in: host)
     await settle(0.4)
     check(panel.naturalContentSize.height > overview + 40, "returning from settings preserves selected detail")
@@ -1506,20 +1553,20 @@ func runFocusedDetailChecks(completion: @escaping () -> Void) {
                 await verifyHover(tag, "gear", at: NSPoint(x: 330, y: 34),
                                   region: NSRect(x: 306, y: 12, width: 48, height: 46),
                                   quiet: NSRect(x: 30, y: 160, width: 60, height: 34), host: host)
-                await verifyHover(tag, "quit", at: NSPoint(x: 324, y: 550),
-                                  region: NSRect(x: 296, y: 532, width: 56, height: 36),
+                await verifyHover(tag, "quit", at: NSPoint(x: 324, y: host.bounds.height - 18),
+                                  region: NSRect(x: 296, y: host.bounds.height - 35, width: 56, height: 32),
                                   quiet: NSRect(x: 30, y: 160, width: 60, height: 34), host: host)
                 click(host, NSPoint(x: 333, y: 26))
                 await settle()
-                check(panel.naturalContentSize.height < overview - 100, tag + " deflected header keeps gear clickable")
+                check(abs(panel.naturalContentSize.height - 461.5) < 0.5 && panel.naturalContentSize.height < overview, tag + " deflected header keeps gear clickable")
                 await verifyHover(tag, "back", at: NSPoint(x: 26, y: 26),
                                   region: NSRect(x: 12, y: 12, width: 28, height: 28),
                                   quiet: NSRect(x: 170, y: 70, width: 60, height: 30), host: host)
                 press("返回指标面板", in: host)
                 await settle()
-                click(host, NSPoint(x: 120, y: 550))
+                click(host, NSPoint(x: 120, y: host.bounds.height - 18))
                 await settle()
-                check(panel.naturalContentSize.height < overview - 100, tag + " deflected footer keeps settings link clickable")
+                check(abs(panel.naturalContentSize.height - 461.5) < 0.5 && panel.naturalContentSize.height < overview, tag + " deflected footer keeps settings link clickable")
                 press("返回指标面板", in: host)
                 await settle()
                 check(abs(panel.naturalContentSize.height - overview) < 0.5, tag + " chrome navigation restores overview geometry")
@@ -1653,8 +1700,8 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
                               region: NSRect(x: 14, y: 78, width: 162, height: 136),
                               quiet: NSRect(x: 200, y: 275, width: 60, height: 34), host: host)
             await verifyMagneticEdges(tag, reduced: reduced, panel: panel, host: host)
-            await verifyHover(tag, "quit", at: NSPoint(x: 324, y: 550),
-                              region: NSRect(x: 296, y: 532, width: 56, height: 36),
+            await verifyHover(tag, "quit", at: NSPoint(x: 324, y: host.bounds.height - 18),
+                              region: NSRect(x: 296, y: host.bounds.height - 35, width: 56, height: 32),
                               quiet: NSRect(x: 30, y: 160, width: 60, height: 34), host: host)
             let viewAX = accessibilityElements(host.window as Any).map { element in
                 ["identifier": accessibilityAttribute(element, "accessibilityIdentifier") as? String ?? "",
@@ -1667,24 +1714,24 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
             press("打开显示与外观设置", in: host)
             await settle()
             let settingsHeight = panel.naturalContentSize.height
-            check(settingsHeight < overview - 100, tag + " actual gear click switches to shorter settings")
+            check(settingsHeight < overview && abs(settingsHeight - 461.5) < 0.5, tag + " actual gear click switches to shorter settings")
             state(tag + "-settings", panel: panel, host: host)
             save(host, name: tag + "-settings-native")
             if opaque {
                 let before = preferences.panelTransparency
-                click(host, NSPoint(x: 337, y: 224))
+                click(host, NSPoint(x: 337, y: 299))
                 await settle()
                 check(preferences.panelTransparency == before, "opaque native transparency slider is disabled")
             } else {
-                await verifyHover(tag, "slider", at: NSPoint(x: 200, y: 224),
-                                  region: NSRect(x: 10, y: 208, width: 340, height: 32),
+                await verifyHover(tag, "slider", at: NSPoint(x: 200, y: 299),
+                                  region: NSRect(x: 10, y: 283, width: 340, height: 32),
                                   quiet: NSRect(x: 30, y: 260, width: 60, height: 30), host: host)
             }
-            await verifyHover(tag, "restore", at: NSPoint(x: 36, y: 350),
-                              region: NSRect(x: 14, y: 338, width: 332, height: 31),
+            await verifyHover(tag, "restore", at: NSPoint(x: 36, y: host.bounds.height - 32),
+                              region: NSRect(x: 14, y: host.bounds.height - 44, width: 332, height: 31),
                               quiet: NSRect(x: 30, y: 260, width: 60, height: 30), host: host)
-            await verifyHover(tag, "login", at: NSPoint(x: 88, y: 313),
-                              region: NSRect(x: 60, y: 296, width: 56, height: 34),
+            await verifyHover(tag, "login", at: NSPoint(x: 88, y: host.bounds.height - 73.5),
+                              region: NSRect(x: 60, y: host.bounds.height - 90.5, width: 56, height: 34),
                               quiet: NSRect(x: 30, y: 260, width: 60, height: 30), host: host)
             for (x, interval) in [(57.0, 0.5), (139.0, 1.0), (222.0, 2.0), (304.0, 5.0)] {
                 click(host, NSPoint(x: x, y: 91))
@@ -1699,10 +1746,10 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
             let loginMock = SMAppService.mainApp
             let previousRegistrations = loginMock.registerCalls
             let previousUnregistrations = loginMock.unregisterCalls
-            click(host, NSPoint(x: 88, y: 313))
+            click(host, NSPoint(x: 88, y: host.bounds.height - 73.5))
             await settle(0.10)
             check(loginMock.registerCalls == previousRegistrations + 1, tag + " native login toggle invokes only mocked registration")
-            click(host, NSPoint(x: 88, y: 313))
+            click(host, NSPoint(x: 88, y: host.bounds.height - 73.5))
             await settle(0.10)
             check(loginMock.unregisterCalls == previousUnregistrations + 1, tag + " native login toggle invokes only mocked unregistration")
             press("恢复显示默认值", in: host)
@@ -1736,7 +1783,7 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
                 let switching = await detailFrames(tag + "-detail-switch-\(Int(point.x))-\(Int(point.y))", panel: panel, host: host) { click(host, point) }
                 check(switching.allSatisfy { $0["body"]! > overview + 40 }, tag + " changing metric keeps detail expanded")
             }
-            let dismissing = await detailFrames(tag + "-detail-dismiss", panel: panel, host: host) { click(host, NSPoint(x: 326, y: 379.5)) }
+            let dismissing = await detailFrames(tag + "-detail-dismiss", panel: panel, host: host) { clickActualDetailClose(tag + "-detail-dismiss", panel: panel, host: host) }
             verifyDetailFrames(dismissing, name: tag + " detail close button", reduced: reduced)
             check(abs(panel.naturalContentSize.height - overview) < 0.5, tag + " close button restores overview height")
             click(host, NSPoint(x: 80, y: 120))
@@ -1746,7 +1793,7 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
             click(host, NSPoint(x: 255, y: 120))
             await settle(0.36)
             check(panel.naturalContentSize.height > overview + 40, tag + " rapid reversal and metric switch settle expanded")
-            click(host, NSPoint(x: 326, y: 379.5))
+            clickActualDetailClose(tag + "-rapid-reversal", panel: panel, host: host)
             await settle()
             check(abs(panel.naturalContentSize.height - overview) < 0.5, tag + " rapid reversal leaves no detail height behind")
 
@@ -1832,12 +1879,15 @@ func runExtendedNativeChecks(completion: @escaping () -> Void) {
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         previewPopover.close()
         await controllerChecks()
+        await verifyIridescentFilm()
         probeReducedMotion = originalMotion
         nativeNotes.append("Reduce Transparency is exercised with a process-only NSWorkspace getter replacement; opaque screenshots and disabled slider are checked without changing system preferences.")
         nativeNotes.append("Reduce Motion uses an isolated process-only NSWorkspace getter replacement plus native accessibility-change notification; SwiftUI branch is verified by centered hover output. It does not change macOS settings and is not OS-setting end-to-end validation.")
         nativeNotes.append("Screenshots with '-native' are full WindowServer crops at exact native window frame, including arrow/glass; '-body' are WindowServer crops of only the SwiftUI body. A probe-only neutral backdrop prevents underlying conversations from appearing.")
         nativeNotes.append("Pixel checks establish hover rendering changes and celebration memory-row replacement/restoration; they do not certify typography sharpness or subjective glass quality.")
         nativeNotes.append("Native menu reflection was checked with synthesized local NSEvent tracking callbacks delivered to the probe-owned production glass view. CG pointer movement alone did not trigger that receiver here, so physical menu tracking is not certified. SwiftUI card hover was exercised with actual CG pointer movement and WindowServer pixel evidence.")
+        nativeNotes.append("Star hover frame checks compare the source bitmap with submitted CALayer.contents PNG pixels at two frame times and preserve held model transforms/cached glyphs. They do not certify WindowServer presentation or multi-display replicant pixels.")
+        nativeNotes.append("The in-process SwiftUI accessibility tree was unavailable here; fallback NSEvent mouse clicks verify real bindings, while AX semantic/value end-to-end checks are not certified.")
         nativeNotes.append("Frame geometry observations are not a 60Hz frame-time performance certification.")
         try! JSONSerialization.data(withJSONObject: ["passedAssertions": nativeChecks.count,
             "checks": nativeChecks, "geometryStateCount": geometryRecords.count,

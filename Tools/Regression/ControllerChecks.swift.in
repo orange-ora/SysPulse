@@ -193,7 +193,7 @@
             view.subviews.flatMap { [$0] + descendants(of: $0) }
         }
         func textView(in host: StatusItemGlassView) -> NSImageView? {
-            descendants(of: host).compactMap { $0 as? NSImageView }.first { $0.image != nil }
+            descendants(of: host).compactMap { $0 as? NSImageView }.first { $0.image != nil && $0.imageScaling == .scaleNone }
         }
         func materialView(in host: StatusItemGlassView) -> NSView? {
             if #available(macOS 26.0, *) {
@@ -242,8 +242,8 @@
                         glassController.glassSizingImage === sizing && glassButton.subviews.count == 1,
                         "10fps frames reuse both native host and fixed-width placeholder")
         }
-        verifyGlass(glyph.image !== firstGlyphImage && glyph.image?.size == sizing.size,
-                    "effect frames update real glyph images without changing size")
+        verifyGlass(glyph.image === firstGlyphImage && glyph.image?.size == sizing.size,
+                    "effect frames preserve the cached foreground while updating the independent background")
         print("native glass: real host/content, same-width placeholder, click pass-through and ten 10fps frames verified")
         glassController.preferences.menuBarLayout = .full
         glassController.updateStatusItem(with: sampled(ready), allowLayoutChange: false)
@@ -304,7 +304,7 @@
         glassController.applyMenuBarImage(nil, to: glassButton)
         verifyGlass(glassButton.image == nil && glassController.glassSizingImage == nil,
                     "nil images leave no stale image or sizing cache")
-        // 文字层缓存：同一份采样复用同一张图；像素与不缓存时的重绘一致；新采样才重画；炫彩每次重画
+        // 文字层缓存：同一份采样复用同一张图；像素与重绘一致；新采样才重画；星点背景独立更新
         let cacheController = StatusItemController()
         let cacheButton = cacheController.statusItem.button!
         cacheController.preferences.menuBarEffect = .diffuse
@@ -329,7 +329,7 @@
         cacheController.preferences.menuBarEffect = .iridescent
         let glyphA = cacheController.textImage(for: cacheSample, density: cacheDensity, appearance: nil)
         let glyphB = cacheController.textImage(for: cacheSample, density: cacheDensity, appearance: nil)
-        precondition(glyphA !== glyphB, "iridescent glyphs keep redrawing every frame")
+        precondition(glyphA === glyphB, "star glass reuses stable foreground glyphs across effect frames")
         print("PASS: text image cache reuses per sample, matches fresh render bytes, and redraws on new samples")
         print("PASS: \(glassAssertions) native-glass lifecycle/frame assertions with real extracted view and apply function")
         print("PASS: exact update/prime/adapt functions, real renderer, fake coordinates; no real GUI")

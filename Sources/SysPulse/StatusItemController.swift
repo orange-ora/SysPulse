@@ -263,7 +263,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     ///   用户手动切成「关闭」时需要（要立刻擦掉背景，见原逻辑）；睡眠/锁屏时不需要。
     private func applyEffectState(redrawIfStopped: Bool) {
         statusGlassView?.setHoverEnabled(preferences.menuBarEffect != .off &&
-                                        preferences.menuBarEffect != .iridescent && effectSuspendReasons.isEmpty)
+                                        effectSuspendReasons.isEmpty)
         if preferences.menuBarEffect != .off, effectSuspendReasons.isEmpty {
             startEffectTimer()
         } else {
@@ -283,7 +283,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             guard let self else { return }
             self.effectElapsed = CACurrentMediaTime() - self.effectStartedAt
             // 背景与面板开合并行更新；复用文字缓存且不触发排版档位决策。
-            self.updateStatusItem(with: self.monitor.snapshot, allowLayoutChange: false)
+            autoreleasepool {
+                self.updateStatusItem(with: self.monitor.snapshot, allowLayoutChange: false)
+            }
         }
         timer.tolerance = interval * 0.1
         RunLoop.main.add(timer, forMode: .common)
@@ -894,9 +896,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         let backgroundTime = usesGlass && NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : effectElapsed
         let background = MenuBarImage.background(size: image.size, appearance: button.effectiveAppearance,
                                                 effect: preferences.menuBarEffect, elapsed: backgroundTime,
-                                                foreground: image)
+                                                foreground: image,
+                                                backingScale: button.window?.backingScaleFactor ?? 2)
         glass.setImage(image, background: background)
-        glass.setHoverEnabled(!usesGlass && effectSuspendReasons.isEmpty)
+        glass.setHoverEnabled(effectSuspendReasons.isEmpty)
     }
 
     /// 换档那一瞬间就按**预测的最终位置**把面板重新锚定好，抢在"系统用中间态摆错位置"
@@ -1113,7 +1116,42 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 }
 
-/// 内容嵌在系统按钮内：炫彩使用玻璃，其他光效保留原图；追踪层不接管点击。
+/// 星点帧已是不可变位图；仅替换图层内容，不让每拍的 NSImageCell 失效波及玻璃材质。
+private final class StatusItemStarImageView: NSImageView {
+    private var frameImage: NSImage?
+    private var frameContents: CGImage?
+
+    override var image: NSImage? {
+        get { frameImage }
+        set {
+            guard frameImage !== newValue else { return }
+            frameImage = newValue
+            frameContents = (newValue?.representations.first as? NSBitmapImageRep)?.cgImage
+            if frameContents == nil, let newValue {
+                frameContents = newValue.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            }
+            updateLayer()
+            // 多屏菜单栏由系统复制，仍通知 AppKit 更新副本；单屏只提交背景图层。
+            if NSScreen.screens.count > 1 { needsDisplay = true }
+        }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        frameImage?.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+
+    override func updateLayer() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.contents = frameContents
+        layer?.contentsGravity = .resize
+        CATransaction.commit()
+    }
+}
+
+/// 内容嵌在系统按钮内：星点使用玻璃，其他光效保留原图；追踪层不接管点击。
 private final class StatusItemGlassView: NSView {
     let usesGlass: Bool
     private let imageView: NSImageView
@@ -1145,7 +1183,7 @@ private final class StatusItemGlassView: NSView {
         text.imageAlignment = .alignCenter
         text.setAccessibilityElement(false)
         imageView = text
-        let background = NSImageView(frame: .zero)
+        let background: NSImageView = usesGlass ? StatusItemStarImageView(frame: .zero) : NSImageView(frame: .zero)
         background.imageScaling = .scaleAxesIndependently
         background.setAccessibilityElement(false)
         backgroundImageView = background

@@ -31,8 +31,8 @@ extension PanelPresentationAnimation {
         verify(window.frame.width == resting.width && window.frame.maxY == resting.maxY,
                "presentation: open preserves width and top anchor")
         animation.drive(0.5)
-        verify(near(window.frame.height, (122.5 + resting.height) / 2) && window.alphaValue == 1,
-               "presentation: actual window follows smoothstep midpoint and full alpha")
+        verify(near(window.frame.height, 122.5 + (resting.height - 122.5) * 0.75) && window.alphaValue == 1,
+               "presentation: initial opening reaches three-quarter height at the eased midpoint")
         verify(opens == 0, "presentation: completion waits until displayed endpoint")
         let oldOpen = animation.link!
         let openProgress = animation.progress
@@ -46,8 +46,8 @@ extension PanelPresentationAnimation {
         verify(window.frame == beforeStale && opens == 0 && closes == 0,
                "presentation: stale old display frame cannot change geometry or complete")
         animation.drive(0.5)
-        verify(near(window.frame.width, resting.width * 0.94) && near(body.contraction, 0.5),
-               "presentation: closing midpoint contracts six percent horizontally")
+        verify(near(window.frame.width, resting.width * 0.94) && body.contraction == 0,
+               "presentation: closing midpoint contracts the window six percent and leaves the document untransformed")
         verify(near(window.frame.maxY, resting.maxY + 4), "presentation: midpoint lift follows same contraction timeline")
         let closeLink = animation.link!
         let currentFrame = window.frame
@@ -65,8 +65,8 @@ extension PanelPresentationAnimation {
         animation.drive(1)
         verify(near(window.frame.width, resting.width * 0.88) && near(window.frame.height, 122.5),
                "presentation: close endpoint contracts twelve percent with real title-height viewport")
-        verify(window.alphaValue == 0 && body.contraction == 1 && closes == 1,
-               "presentation: close completion arrives after invisible contracted endpoint")
+        verify(window.alphaValue == 0 && body.contraction == 0 && closes == 1,
+               "presentation: close completion follows the invisible window endpoint while the document stays natural")
         animation.restore()
         verify(window.frame == resting && body.contraction == 0 && window.alphaValue == 1 && popover.contentSize == resting.size,
                "presentation: restore cancels transforms and reinstates full window/content size")

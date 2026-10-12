@@ -4,6 +4,7 @@ extension StatusItemGlassView {
         let glyphSize = imageView.frame.size
         let reflectedBounds = hoverReflection.bounds
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        verify(hoverEnabled, "hover: controller enables tracking for star glass before pointer checks")
         setHoverEnabled(true)
         setHovered(true, point: NSPoint(x: laidOutFrame.maxX, y: laidOutFrame.maxY), animated: false)
         verify(hoverReflection.opacity == 1 && hoverHighlight.opacity == 1,
@@ -16,6 +17,46 @@ extension StatusItemGlassView {
         }
         verify(layers(layer!).allSatisfy { $0.shadowOpacity == 0 }, "hover: every custom menu-bar layer is free of stereoscopic shadow")
         let transform = contentView.layer!.transform
+        if usesGlass {
+            let foreground = imageView.image!
+            let previousBackground = backgroundImageView.image!
+            let nextBackground = MenuBarImage.background(size: foreground.size,
+                appearance: effectiveAppearance, effect: .iridescent, elapsed: 3.7, foreground: foreground)!
+            verify(nextBackground.representations.first is NSBitmapImageRep,
+                   "hover: star frame is an eager bitmap before layer submission")
+            backgroundImageView.image = nextBackground
+            verify(backgroundImageView.layer?.contents != nil && imageView.image === foreground &&
+                   CATransform3DEqualToTransform(transform, contentView.layer!.transform),
+                   "hover: replacing star bitmap retains cached foreground and pointer tilt")
+            func pixels(_ image: CGImage?) -> Data? {
+                image.flatMap { NSBitmapImageRep(cgImage: $0).tiffRepresentation }
+            }
+            func submittedPixels() -> Data? {
+                guard let contents = backgroundImageView.layer?.contents,
+                      CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else { return nil }
+                let image = contents as! CGImage
+                return pixels(image)
+            }
+            let nextPixels = pixels((nextBackground.representations.first as? NSBitmapImageRep)?.cgImage)
+            verify(nextPixels != nil && submittedPixels() == nextPixels,
+                   "hover: submitted star layer pixels equal the new source bitmap")
+            let laterBackground = MenuBarImage.background(size: foreground.size,
+                appearance: effectiveAppearance, effect: .iridescent, elapsed: 8.7, foreground: foreground)!
+            backgroundImageView.image = laterBackground
+            let laterPixels = pixels((laterBackground.representations.first as? NSBitmapImageRep)?.cgImage)
+            verify(laterPixels != nil && laterPixels != nextPixels &&
+                   submittedPixels() == laterPixels &&
+                   CATransform3DEqualToTransform(transform, contentView.layer!.transform),
+                   "hover: successive submitted star pixels advance without resetting held tilt")
+            verify(backgroundImageView.layer?.animation(forKey: "contents") == nil,
+                   "hover: background updates do not install implicit contents animations")
+            backgroundImageView.image = nil
+            verify(backgroundImageView.image == nil && backgroundImageView.layer?.contents == nil,
+                   "hover: clearing a star frame releases stale layer contents")
+            backgroundImageView.image = previousBackground
+            verify(backgroundImageView.layer?.contents != nil,
+                   "hover: background contents recover after a cleared frame")
+        }
         let xLength = sqrt(transform.m11 * transform.m11 + transform.m12 * transform.m12 + transform.m13 * transform.m13)
         let yLength = sqrt(transform.m21 * transform.m21 + transform.m22 * transform.m22 + transform.m23 * transform.m23)
         verify(abs(xLength - 1) < 0.00001 && abs(yLength - 1) < 0.00001,

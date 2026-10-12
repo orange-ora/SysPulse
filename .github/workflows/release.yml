@@ -80,21 +80,34 @@ jobs:
           notes += current.replace('<docs/UPDATE-v' + version + '.md>', 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/blob/v' + version + '/docs/UPDATE-v' + version + '.md').replace('<README.md#下载与安装>', 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/blob/v' + version + '/README.md#下载与安装') + '\n\n'
           repo = os.environ['GITHUB_REPOSITORY']
           base = 'https://raw.githubusercontent.com/' + repo + '/v' + version + '/docs/'
+          def latest_image(prefix):
+              exact = Path('docs') / (prefix + '-v' + version + '.png')
+              if exact.is_file():
+                  return exact.name
+              target = tuple(map(int, version.split('.')))
+              candidates = []
+              for image in Path('docs').glob(prefix + '-v*.png'):
+                  parts = image.stem[len(prefix) + 2:].split('.')
+                  if all(part.isdigit() for part in parts):
+                      image_version = tuple(map(int, parts))
+                      if image_version <= target:
+                          candidates.append((image_version, image.name))
+              return max(candidates, default=((), None))[1]
           previews = [
-              ('menubar-stars-v' + version + '.png', '星点背景单行渲染预览'),
-              ('menubar-stars-compact-v' + version + '.png', '星点背景双行渲染预览'),
+              (latest_image('menubar-stars'), '星点背景单行渲染预览'),
+              (latest_image('menubar-stars-compact'), '星点背景双行渲染预览'),
           ]
           screenshots = [
-              ('panel-v' + version + '.png', '指标面板'),
-              ('settings-v' + version + '.png', '显示与外观设置'),
+              (latest_image('panel'), '指标面板'),
+              (latest_image('settings'), '显示与外观设置'),
           ]
-          available_previews = [(file, label) for file, label in previews if (Path('docs') / file).is_file()]
-          available_screenshots = [(file, label) for file, label in screenshots if (Path('docs') / file).is_file()]
+          available_previews = [(file, label) for file, label in previews if file]
+          available_screenshots = [(file, label) for file, label in screenshots if file]
           if available_previews:
               notes += '### 星点背景预览\n\n以下为受控底色上的生产渲染预览，不是原生菜单栏截图；实际玻璃透色随桌面背景变化。\n\n'
               notes += ''.join('![' + label + '](' + base + file + ')\n\n' for file, label in available_previews)
           if available_screenshots:
-              notes += '### 新版界面\n\n'
+              notes += '### 界面截图\n\n以下沿用仓库中最新的对应界面截图，图片文件名保留拍摄版本；读数与玻璃透色随环境变化。\n\n'
               notes += ''.join('![' + label + '](' + base + file + ')\n\n' for file, label in available_screenshots)
           notes += '[完整更新报告](https://github.com/' + repo + '/blob/v' + version + '/docs/UPDATE-v' + version + '.md)\n'
           Path('release/notes.md').write_text(notes)

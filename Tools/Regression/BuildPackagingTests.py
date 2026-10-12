@@ -7,6 +7,8 @@ root and fake compiler/signing/launch commands; real ditto tests backup round tr
 All expanded fixtures live below a temporary .noindex directory.
 """
 from pathlib import Path
+import base64
+import hashlib
 import json
 import os
 import plistlib
@@ -17,6 +19,7 @@ import zipfile
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = (REPO / 'build.sh').read_text()
+PASSED_CHECKS = 0
 WORKFLOW = REPO / '.github/workflows/release.yml'
 MOCK = r'''#!/usr/bin/env python3
 from pathlib import Path
@@ -72,7 +75,9 @@ else:
 
 
 def check(condition, description):
+    global PASSED_CHECKS
     assert condition, description
+    PASSED_CHECKS += 1
     print('PASS:', description)
 
 
@@ -162,13 +167,26 @@ def workflow_checks():
     check(package_script is not None and 'SysPulse-release.XXXXXX"' in package_script and 'RELEASE_TEMP="$RELEASE_TEMP.noindex"' in package_script and 'trap ' in package_script, 'CI temporary staging is noindex and trap-cleaned')
     check('.metadata_never_index' in package_script and 'release/staging/SysPulse.app' not in package_script, 'CI DMG root disables indexing and ordinary staging app removed')
     check(workflow['permissions'] == {'contents': 'write'}, 'CI retains release-only contents permission')
-    print('PASS: workflow YAML, shell, and embedded Python syntax')
+    check(True, 'workflow YAML, shell, and embedded Python syntax')
     with tempfile.TemporaryDirectory(prefix='SysPulse-ci-packaging.', suffix='.noindex') as directory:
         root = Path(directory)
         (root / 'Resources').mkdir()
         (root / 'Resources/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString': '9.8.7', 'CFBundleVersion': '1'}))
         (root / 'Resources/AppIcon.icns').write_bytes(b'fixture-icon')
         (root / 'CHANGELOG.md').write_text('# Updates\n\n## v9.8.7（fixture）\nFixture release notes\n[Report](<docs/UPDATE-v9.8.7.md>)\n[Install](<README.md#下载与安装>)\n\n## v9.8.6（fixture）\nPrevious release notes\n')
+        docs = root / 'docs'
+        docs.mkdir()
+        (docs / 'UPDATE-v9.8.7.md').write_text('# Fixture update report\n')
+        # Real image files model the screenshots/previews available in the checkout.
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+        images = ['menubar-stars-v9.8.7.png', 'menubar-stars-compact-v9.8.7.png',
+                  'panel-v9.8.7.png', 'settings-v9.8.7.png', 'memory-detail-v9.8.7.png']
+        for filename in images:
+            (docs / filename).write_bytes(png)
+        historical_images = ['panel-v9.8.6.png', 'panel-v9.8.5.png', 'panel-v9.7.10.png',
+                             'panel-v9.8.8.png', 'panel-v10.0.0.png', 'panel-vinvalid.png']
+        for filename in historical_images:
+            (docs / filename).write_bytes(png)
         (root / 'build').mkdir()
         (root / 'build/SysPulse').write_text('new executable\n')
         commands = root / 'commands'
@@ -187,7 +205,9 @@ def workflow_checks():
         check(result.returncode == 0, 'CI packaging script executes successfully with controlled tools: ' + result.stderr)
         check(not list(runner_temp.iterdir()), 'CI packaging success trap removes expanded app')
         checksum = (root / 'release/SysPulse-9.8.7.dmg.sha256').read_text().split()
-        check(checksum[1] == 'SysPulse-9.8.7.dmg', 'CI emits version-derived DMG and checksum')
+        check(checksum[1] == 'SysPulse-9.8.7.dmg' and
+              checksum[0] == hashlib.sha256((root / 'release/SysPulse-9.8.7.dmg').read_bytes()).hexdigest(),
+              'CI emits version-derived DMG and exact SHA-256 checksum')
         notes = (root / 'release/notes.md').read_text()
         check('Fixture release notes' in notes and 'Previous release notes' not in notes, 'CI release notes include only the current version')
         check('https://github.com/fixture/SysPulse/blob/v9.8.7/docs/UPDATE-v9.8.7.md' in notes and
@@ -195,6 +215,39 @@ def workflow_checks():
               'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/panel-v9.8.7.png' in notes and
               'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/settings-v9.8.7.png' in notes,
               'CI release report, install links and screenshots use the version tag')
+        check('https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/menubar-stars-v9.8.7.png' in notes and
+              'https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/menubar-stars-compact-v9.8.7.png' in notes and
+              '不是原生菜单栏截图' in notes and 'v9.8.6.png' not in notes,
+              'CI includes available current previews with truthful render labeling and excludes historical images')
+        # Missing images are deliberately optional: verify both present and absent paths.
+        for filename in images:
+            (docs / filename).unlink()
+        result = subprocess.run(['bash', '-c', package_script], cwd=root, env=env, capture_output=True, text=True, errors='replace')
+        check(result.returncode == 0 and not list(runner_temp.iterdir()),
+              'CI succeeds and cleans staging when patch release uses an older screenshot: ' + result.stderr)
+        fallback_notes = (root / 'release/notes.md').read_text()
+        check('https://raw.githubusercontent.com/fixture/SysPulse/v9.8.7/docs/panel-v9.8.6.png' in fallback_notes and
+              all(filename not in fallback_notes for filename in historical_images if filename != 'panel-v9.8.6.png') and
+              '图片文件名保留拍摄版本' in fallback_notes,
+              'CI selects newest valid numeric screenshot at or before the target and labels its actual capture version')
+        for filename in historical_images:
+            (docs / filename).unlink()
+        result = subprocess.run(['bash', '-c', package_script], cwd=root, env=env, capture_output=True, text=True, errors='replace')
+        check(result.returncode == 0 and not list(runner_temp.iterdir()),
+              'CI succeeds and cleans staging when every optional image is absent: ' + result.stderr)
+        absent_notes = (root / 'release/notes.md').read_text()
+        check('![' not in absent_notes and 'raw.githubusercontent.com/' not in absent_notes and
+              'Fixture release notes' in absent_notes and 'UPDATE-v9.8.7.md' in absent_notes,
+              'CI absent-image notes retain release content/report without broken image links')
+        for filename in ['panel-v9.8.7.png', 'menubar-stars-v9.8.7.png']:
+            (docs / filename).write_bytes(png)
+        result = subprocess.run(['bash', '-c', package_script], cwd=root, env=env, capture_output=True, text=True, errors='replace')
+        check(result.returncode == 0 and not list(runner_temp.iterdir()),
+              'CI succeeds and cleans staging with a partial current-version image set: ' + result.stderr)
+        partial_notes = (root / 'release/notes.md').read_text()
+        check('docs/panel-v9.8.7.png' in partial_notes and 'docs/menubar-stars-v9.8.7.png' in partial_notes and
+              'settings-v9.8.7.png' not in partial_notes and 'menubar-stars-compact-v9.8.7.png' not in partial_notes,
+              'CI partial-image notes include only files actually present in the checkout')
         env['FIXTURE_FAIL'] = 'sign'
         result = subprocess.run(['bash', '-c', package_script], cwd=root, env=env, capture_output=True, text=True, errors='replace')
         check(result.returncode != 0 and not list(runner_temp.iterdir()), 'CI signing failure stops and cleans expanded app')
@@ -225,7 +278,7 @@ def main():
         subprocess.run(['/usr/bin/swiftc', '-O', '-swift-version', '5', '-warnings-as-errors',
                         '-target', 'arm64-apple-macosx14.0', '-module-cache-path', str(root / 'modulecache'),
                         '-framework', 'AppKit', str(helper), '-o', str(root / 'stop-installed')], check=True)
-        print('PASS: real precise-path Swift helper compiles; not executed')
+        check(True, 'real precise-path Swift helper compiles; not executed')
         fixture(root, 'local', local=True)
         fixture(root, 'signature-failure', failure='sign')
         fixture(root, 'candidate-verify-failure', failure='candidate-verify')
@@ -236,7 +289,7 @@ def main():
         fixture(root, 'install-success')
         fixture(root, 'install-no-launch', no_launch=True)
     workflow_checks()
-    print('All controlled packaging checks passed; no real app installed or terminated.')
+    print(f'All {PASSED_CHECKS} controlled packaging checks passed; no real app installed or terminated.')
 
 
 if __name__ == '__main__':
