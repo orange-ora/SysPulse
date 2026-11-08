@@ -34,6 +34,17 @@ enum Format {
 
     static func bytes(_ value: UInt64) -> String { bytes(Double(value)) }
 
+    /// 固定小数位的容量写法：`13.83 G`。
+    ///
+    /// 只用于要和活动监视器对照的内存「已用」读数：活动监视器同样按 1024 进位
+    /// 并保留两位小数（`13.74 GB`）。默认写法会把 13.74 进成 `14 G`，
+    /// 读起来像是另一台机器的数据，所以这一处显式取两位。
+    static func bytes(_ value: UInt64, decimals: Int) -> String {
+        let (v, unit) = scaled(Double(value), step: capacityStep)
+        if unit == "B" { return String(format: "%.0f B", v) }
+        return String(format: "%.\(decimals)f %@", v, unit)
+    }
+
     /// 速度：`1.2 MB/s`（1000 进位）
     static func speed(_ bytesPerSecond: Double) -> String {
         let (v, unit) = scaled(bytesPerSecond, step: speedStep)

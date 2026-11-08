@@ -132,9 +132,21 @@ enum MemoryPressure: Equatable {
     }
 }
 
-/// 读取 Mach VM 统计，按「活跃 + 联动 + 压缩」估算已用内存（与活动监视器口径接近）。
+/// 读取 Mach VM 统计，按「物理内存 − 空闲 − 文件缓存」计算已用内存，与活动监视器一致。
 final class MemoryMonitor {
     private let pageSize = UInt64(vm_kernel_page_size)
+
+    /// 活动监视器的「已使用内存」= 物理内存 − 空闲页 − 文件支撑页（已缓存文件）。
+    ///
+    /// 不是 `active + wired + compressed`：那三项加起来比活动监视器少 0.6 GiB 左右
+    /// （同一时刻实测 13.14 / 13.13 vs 13.80 / 13.74），因为压缩后的页面之外还有一批
+    /// 内核记账页既不算 active 也不算 free。本机四次同步采样下本式子与活动监视器的
+    /// 差值为 0.04 / 0.01 / 0.03 / 0.04 GiB（13.76/13.80、13.75/13.74、13.96/13.93、
+    /// 13.94/13.90），故采用这一口径。
+    static func usedBytes(total: UInt64, free: UInt64, fileBacked: UInt64) -> UInt64 {
+        let reclaimable = free &+ fileBacked
+        return total > reclaimable ? total - reclaimable : 0
+    }
 
     private(set) var used: UInt64 = 0
     private(set) var total: UInt64 = 0
@@ -166,10 +178,9 @@ final class MemoryMonitor {
         }
 
         if result == KERN_SUCCESS {
-            let active = UInt64(stats.active_count) * pageSize
-            let wired = UInt64(stats.wire_count) * pageSize
-            let compressed = UInt64(stats.compressor_page_count) * pageSize
-            used = active + wired + compressed
+            let free = UInt64(stats.free_count) * pageSize
+            let fileBacked = UInt64(stats.external_page_count) * pageSize
+            used = Self.usedBytes(total: total, free: free, fileBacked: fileBacked)
         }
 
         var swap = xsw_usage()

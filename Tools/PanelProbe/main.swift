@@ -169,7 +169,7 @@ func press(_ label: String, in hosting: NSView) {
     }
     let point: NSPoint
     switch label {
-    case "菜单栏显示网速": point = NSPoint(x: 88, y: hosting.bounds.height - 67)
+    case "菜单栏显示网速": point = NSPoint(x: 88, y: 471) // 相对内容顶端定位：页脚加高只向下增长，开关行不动
     case "打开显示与外观设置": point = NSPoint(x: 333, y: 43)
     case "刷新频率，2 秒": point = NSPoint(x: 222, y: 91)
     case "菜单栏排版，双行": point = NSPoint(x: 222, y: 160)

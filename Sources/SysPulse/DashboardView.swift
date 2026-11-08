@@ -216,7 +216,7 @@ struct DashboardView: View {
             }
             HStack(spacing: 8) {
                 metricTile(.memory, icon: "memorychip", fraction: snapshot.memoryFraction,
-                           detail: "\(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal))",
+                           detail: "\(Format.bytes(snapshot.memoryUsed, decimals: 2)) / \(Format.bytes(snapshot.memoryTotal))",
                            history: monitor.memoryHistory)
                 networkTile
             }
@@ -361,7 +361,7 @@ struct DashboardView: View {
             if let memory = snapshot.gpuMemory { parts.append("GPU 内存 \(Format.bytes(memory))") }
             return parts.isEmpty ? "实时利用率" : parts.joined(separator: " · ")
         case .memory:
-            return "压力：\(snapshot.memoryPressure.title) · 已用 \(Format.bytes(snapshot.memoryUsed)) / \(Format.bytes(snapshot.memoryTotal)) · 交换 \(Format.bytes(snapshot.swapUsed))"
+            return "压力：\(snapshot.memoryPressure.title) · 已用 \(Format.bytes(snapshot.memoryUsed, decimals: 2)) / \(Format.bytes(snapshot.memoryTotal)) · 交换 \(Format.bytes(snapshot.swapUsed))"
         case .network:
             return "本次运行接收 \(Format.bytes(snapshot.totalDown)) · 发送 \(Format.bytes(snapshot.totalUp))"
         }
@@ -382,12 +382,17 @@ struct DashboardView: View {
             }
             Spacer(minLength: 0)
             Button { setDetail(nil) } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .medium))
-                    .frame(width: 20, height: 20)
+                // 与设置齿轮、返回箭头同一套圆形控制；明细卡里的叉常显一层圆框，悬停再加亮。
+                PanelHoverPlate(palette: palette, plate: palette.tile, circular: true,
+                                restingOpacity: 1.0) { hovered in
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .scaleEffect(hovered && !reduceMotion ? 1.08 : 1)
+                        .animation(reduceMotion ? nil : .smooth(duration: 0.22, extraBounce: 0), value: hovered)
+                        .frame(width: 24, height: 24)
+                }
             }
             .buttonStyle(PanelPressButtonStyle())
-            .modifier(PanelGlassStyle(palette: palette, cornerRadius: 6, isControl: true))
             .foregroundStyle(palette.secondary)
             .accessibilityLabel("收起明细")
         }
@@ -1021,6 +1026,8 @@ private struct PanelHoverPlate<Content: View>: View {
     let plate: Color
     var cornerRadius: CGFloat = 8
     var circular = false
+    /// 静止态玻璃板的不透明度。默认 0：只有悬停才浮出。需要长期可见的圆框传入更高值。
+    var restingOpacity: Double = 0
     @ViewBuilder let content: (Bool) -> Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @PanelState private var isHovered = false
@@ -1040,7 +1047,7 @@ private struct PanelHoverPlate<Content: View>: View {
                             cornerRadius: circular ? min(geometry.size.width, geometry.size.height) / 2 : cornerRadius,
                             isControl: true))
                         .clipShape(shape)
-                        .opacity(isHovered ? 1 : 0)
+                        .opacity(isHovered ? 1 : restingOpacity)
                 }
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)

@@ -67,6 +67,20 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
     }
     static func close(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.00001 }
 
+    static func memoryAccounting() {
+        let giB: UInt64 = 1_073_741_824
+        // 活动监视器口径：已用 = 物理内存 − 空闲 − 文件缓存。
+        check(MemoryMonitor.usedBytes(total: 16 * giB, free: giB / 8, fileBacked: 2 * giB + giB / 8)
+                == 13 * giB + giB * 3 / 4,
+              "memory: used memory is total minus free and file-backed pages")
+        check(MemoryMonitor.usedBytes(total: 16 * giB, free: 0, fileBacked: 0) == 16 * giB,
+              "memory: used memory reaches total when nothing is free or cached")
+        check(MemoryMonitor.usedBytes(total: 16 * giB, free: 8 * giB, fileBacked: 8 * giB) == 0,
+              "memory: used memory bottoms out at zero")
+        check(MemoryMonitor.usedBytes(total: 16 * giB, free: 9 * giB, fileBacked: 8 * giB) == 0,
+              "memory: counters exceeding physical memory clamp to zero instead of underflowing")
+    }
+
     static func memoryPressure() {
         MemoryPressureFixture.enabled = true
         defer {
@@ -1086,6 +1100,7 @@ func sysctl(_ mib: UnsafeMutablePointer<Int32>?, _ mibCount: UInt32,
             return
         }
         memoryPressure()
+        memoryAccounting()
         metricColors()
         network()
         networkParser()
