@@ -159,11 +159,10 @@ struct DashboardView: View {
             separator
             footer
                 .padding(.horizontal, 4)
+                .padding(.vertical, 8)
                 .modifier(PanelReadingPlate(palette: palette))
-                .padding(.vertical, 6)
                 .modifier(PointerCardHover(cornerRadius: 12, borderTint: palette.accent,
                                            borderOpacity: 0.80, palette: palette, tracksSubcontrols: true))
-                .padding(.vertical, -6)
         }
     }
 

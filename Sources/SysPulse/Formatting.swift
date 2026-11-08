@@ -4,29 +4,41 @@ import Foundation
 enum Format {
     private static let units = ["B", "K", "M", "G", "T", "P"]
 
+    /// 容量进位：1024（`1 GB = 1024³ B`）。
+    ///
+    /// 内存、交换、显存都走这一档，所以 16 GiB 的机器显示 `16 G`，和「关于本机」
+    /// 「活动监视器」里用户看到的 16 GB 对得上。单位字面仍写 `GB`，不引入 `GiB`。
+    private static let capacityStep: Double = 1024
+
+    /// 速度进位：1000（`1 MB/s = 10⁶ B/s`），与网络带宽的十进制习惯一致。
+    /// 菜单栏槽位宽度是按这套数值实测的，不要改成 1024。
+    private static let speedStep: Double = 1000
+
     /// 把字节数拆成 (数值, 单位) 的形式。
-    private static func scaled(_ value: Double) -> (value: Double, unit: String) {
+    private static func scaled(_ value: Double, step: Double) -> (value: Double, unit: String) {
         var v = max(value, 0)
         var index = 0
-        while v >= 1000, index < units.count - 1 {
-            v /= 1000
+        while v >= step, index < units.count - 1 {
+            v /= step
             index += 1
         }
         return (v, units[index])
     }
 
-    /// 容量：`1.2 GB`
+    /// 容量：`1.2 GB`（1024 进位）
     static func bytes(_ value: Double) -> String {
-        let (v, unit) = scaled(value)
+        let (v, unit) = scaled(value, step: capacityStep)
         if unit == "B" { return String(format: "%.0f B", v) }
         return String(format: v < 10 ? "%.1f %@" : "%.0f %@", v, unit)
     }
 
     static func bytes(_ value: UInt64) -> String { bytes(Double(value)) }
 
-    /// 速度：`1.2 MB/s`
+    /// 速度：`1.2 MB/s`（1000 进位）
     static func speed(_ bytesPerSecond: Double) -> String {
-        bytes(bytesPerSecond) + "/s"
+        let (v, unit) = scaled(bytesPerSecond, step: speedStep)
+        if unit == "B" { return String(format: "%.0f B/s", v) }
+        return String(format: v < 10 ? "%.1f %@/s" : "%.0f %@/s", v, unit)
     }
 
     /// 状态栏用的紧凑速度：`1.2M`
@@ -47,9 +59,9 @@ enum Format {
     /// 两个阈值合起来保证任意单位的整数部分最多 3 位。唯一的例外是单位表顶端
     /// （`P`，10¹⁵ 量级）无法再进位 —— 那需要 10¹⁸ B/s，物理上不可达。
     static func compactSpeed(_ bytesPerSecond: Double) -> String {
-        var (v, unit) = scaled(bytesPerSecond)
+        var (v, unit) = scaled(bytesPerSecond, step: speedStep)
         if v >= 999.5, let index = units.firstIndex(of: unit), index < units.count - 1 {
-            v /= 1000
+            v /= speedStep
             unit = units[index + 1]
         }
         if unit == "B" { return String(format: "%.0fB", v) }
